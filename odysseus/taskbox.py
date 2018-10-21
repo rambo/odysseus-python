@@ -13,7 +13,7 @@ class TaskBox:
         self.id = id
     def read(self):
         raise Exception('NOT YET IMPLEMENTED')
-    def write(self, newState):
+    def write(self, new_state):
         raise Exception('NOT YET IMPLEMENTED')
 
 
@@ -26,20 +26,20 @@ class MockTaskBox:
          + "' to change backend state")
 
     def read(self):
-        new_state = self._read_and_delete()
-        if new_state:
+        new_backend_state = self._read_and_delete()
+        if new_backend_state:
             print("READ NEW MOCK BACKEND STATE")
-            self.state = new_state
+            self.state = new_backend_state
         print("READ(" + self.id + "):  " + str(self.state))
         return self.state
 
-    def write(self, newState):
-        new_state = self._read_and_delete()
-        if new_state:
+    def write(self, new_state):
+        new_backend_state = self._read_and_delete()
+        if new_backend_state:
             print("BACKEND STATE HAS CHANGED, CAUSING EXCEPTION")
-            self.state = new_state
+            self.state = new_backend_state
             raise ConcurrentModificationException
-        self.state = newState
+        self.state = new_state
         print("WRITE(" + self.id + "): " + str(self.state))
 
     def _read_and_delete(self):
