@@ -2,6 +2,11 @@ import copy
 import argparse
 import json
 from time import time, sleep
+from pathlib import Path
+
+class ConcurrentModificationException(Exception):
+    pass
+
 
 class TaskBox:
     def __init__(self, id):
@@ -16,14 +21,34 @@ class MockTaskBox:
     def __init__(self, id, initial_state):
         self.id = id
         self.state = initial_state
+        self.mock_state_file = Path("backend-mock-" + id + ".json")
+        print("Mock backend created, write to file '" + str(self.mock_state_file)
+         + "' to change backend state")
 
     def read(self):
+        new_state = self._read_and_delete()
+        if new_state:
+            print("READ NEW MOCK BACKEND STATE")
+            self.state = new_state
         print("READ(" + self.id + "):  " + str(self.state))
         return self.state
 
     def write(self, newState):
+        new_state = self._read_and_delete()
+        if new_state:
+            print("BACKEND STATE HAS CHANGED, CAUSING EXCEPTION")
+            self.state = new_state
+            raise ConcurrentModificationException
         self.state = newState
         print("WRITE(" + self.id + "): " + str(self.state))
+
+    def _read_and_delete(self):
+        if self.mock_state_file.is_file():
+            with self.mock_state_file.open() as source:
+                data = json.load(source)
+            self.mock_state_file.unlink()
+            return data
+        return None
 
 
 
@@ -71,18 +96,23 @@ class TaskBoxRunner:
 
 
     def _poll_backend(self):
-        read_state = self._box.read()
+        read_state = self._box.read()  # FIXME: Handle network errors
         if read_state != self._previous_backend_state:
             # State changed in backend server
             self._state = read_state
+            self._previous_backend_state = read_state
             self._state_changed = False
             self._call_callback(True)
 
 
     def _write_backend(self):
-        self._box.write(self._state) # FIXME: Handle optimistic locking failure
-        self._previous_backend_state = self._state
-        self._state_changed = False
+        try:
+            self._box.write(self._state)  # FIXME: Handle network errors
+            self._previous_backend_state = self._state
+            self._state_changed = False
+        except ConcurrentModificationException:
+            self._previous_backend_state = None
+            self._poll_backend()
 
 
     def _call_callback(self, backend_change):
