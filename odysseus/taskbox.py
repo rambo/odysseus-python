@@ -152,6 +152,9 @@ class TaskBoxRunner:
         parser.add_argument('--id', help='Task box ID in backend')
         parser.add_argument('--mock', action='store_true', help='Use mock backend')
         parser.add_argument('--mock-init', help='Initial JSON state of mock')
+        parser.add_argument('--run-interval', type=float, help='Override running interval (secs, float)')
+        parser.add_argument('--poll-interval', type=float, help='Override polling interval (secs, float)')
+        parser.add_argument('--write-interval', type=float, help='Override writing interval (secs, float)')
         args = parser.parse_args()
         if args.id:
             options["id"] = args.id
@@ -159,3 +162,9 @@ class TaskBoxRunner:
             options["mock"] = True
         if args.mock_init:
             options["mock_init"] = json.loads(args.mock_init)
+        if args.run_interval:
+            options["run_interval"] = args.run_interval
+        if args.poll_interval:
+            options["poll_interval"] = args.poll_interval
+        if args.write_interval:
+            options["write_interval"] = args.write_interval
