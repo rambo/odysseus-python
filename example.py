@@ -7,14 +7,18 @@ import time
 
 # Usage:  python3 example.py --id myid --mock --mock-init '{"number":7}'
 
-def logic(state):
-    if random.random() > 0.5:
-        state["number"] = state.get("number", 0) + 1
-    print("number=" + str(state.get("number", None)))
+def logic(state, backend_change):
+    if backend_change:
+        print("Backend changed to: number=" + str(state.get("number", None)))
+    else:
+        if random.random() > 0.5:
+            state["number"] = state.get("number", 0) + 1
+        print("number=" + str(state.get("number", None)))
     return state
 
 options = {
     "callback": logic,
-    "interval": 0.5,
+    "run_interval": 0.3,
+#    "write_interval": 2
 }
-run_task_box(options)
+TaskBoxRunner(options).run()
