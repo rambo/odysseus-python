@@ -97,6 +97,10 @@ class TaskBoxRunner:
 
     def _poll_backend(self):
         read_state = self._box.read()  # FIXME: Handle network errors
+        if read_state == {} and self.options.get("initial_state", None):
+            # Set initial state
+            self._box.write(self.options["initial_state"])
+            read_state = self.options["initial_state"]
         if read_state != self._previous_backend_state:
             # State changed in backend server
             self._state = read_state
