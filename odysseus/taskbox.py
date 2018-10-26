@@ -18,9 +18,10 @@ class TaskBox:
 
 
 class MockTaskBox:
-    def __init__(self, id, initial_state):
+    def __init__(self, id, initial_state, debug):
         self.id = id
         self.state = initial_state
+        self.debug = debug
         self.mock_state_file = Path("backend-mock-" + id + ".json")
         print("Mock backend created, write to file '" + str(self.mock_state_file)
          + "' to change backend state")
@@ -28,19 +29,23 @@ class MockTaskBox:
     def read(self):
         new_backend_state = self._read_and_delete()
         if new_backend_state:
-            print("READ NEW MOCK BACKEND STATE")
+            if self.debug:
+                print("READ NEW MOCK BACKEND STATE")
             self.state = new_backend_state
-        print("READ(" + self.id + "):  " + str(self.state))
+        if self.debug:
+            print("READ(" + self.id + "):  " + str(self.state))
         return self.state
 
     def write(self, new_state):
         new_backend_state = self._read_and_delete()
         if new_backend_state:
-            print("BACKEND STATE HAS CHANGED, CAUSING EXCEPTION")
+            if self.debug:
+                print("BACKEND STATE HAS CHANGED, CAUSING EXCEPTION")
             self.state = new_backend_state
             raise ConcurrentModificationException
         self.state = new_state
-        print("WRITE(" + self.id + "): " + str(self.state))
+        if self.debug:
+            print("WRITE(" + self.id + "): " + str(self.state))
 
     def _read_and_delete(self):
         if self.mock_state_file.is_file():
@@ -59,7 +64,7 @@ class TaskBoxRunner:
         self._validate(options)
 
         if options['mock']:
-            self._box = MockTaskBox(options['id'], options.get('mock_init', {}))
+            self._box = MockTaskBox(options['id'], options.get('mock_init', {}), options.get('mock_print', False))
         else:
             self._box = TaskBox(options['id'])
 
@@ -156,6 +161,7 @@ class TaskBoxRunner:
         parser.add_argument('--id', help='Task box ID in backend')
         parser.add_argument('--mock', action='store_true', help='Use mock backend')
         parser.add_argument('--mock-init', help='Initial JSON state of mock')
+        parser.add_argument('--mock-print', action='store_true', help='Print mock state changes')
         parser.add_argument('--run-interval', type=float, help='Override running interval (secs, float)')
         parser.add_argument('--poll-interval', type=float, help='Override polling interval (secs, float)')
         parser.add_argument('--write-interval', type=float, help='Override writing interval (secs, float)')
@@ -164,6 +170,8 @@ class TaskBoxRunner:
             options["id"] = args.id
         if args.mock:
             options["mock"] = True
+        if args.mock_print:
+            options["mock_print"] = True
         if args.mock_init:
             options["mock_init"] = json.loads(args.mock_init)
         if args.run_interval:
