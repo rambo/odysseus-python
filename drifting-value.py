@@ -6,7 +6,7 @@ import time
 import math
 import keypress
 
-# Usage:  python3 drifting-value.py --id myid --mock
+# Usage:  python3 drifting-value.py --id myid --mock-pi --mock-server
 
 
 # Displays a drifting value with randomness. Value can be adjusted
@@ -21,6 +21,7 @@ import keypress
 
 CALLS_PER_SECOND=10
 
+SWITCH_GPIO_PIN=27
 
 default_state = {
     "value": 330.5,         # current "real" value
@@ -31,7 +32,7 @@ default_state = {
     "sinePosition": 0,      # sine wave position
     "config": {
         "maxRndMagnitude": 30,       # maximum white noise value when updating value
-        "rndMagnitudeDecay": 0.97,   # how fast random magnitude decays (stabilation time: 0.95 ~5s, 0.97 ~10s)
+        "rndMagnitudeDecay": 0.95,   # how fast random magnitude decays (stabilation time: 0.95 ~5s, 0.97 ~10s)
         "brownNoiseSpeed": 0.1,      # magnitude how fast brown noise changes
         "brownNoiseMax": 10,         # maximum absolute value of brownian noise
         "sineMagnitude": 1,          # magnitude of sine wave
@@ -40,7 +41,7 @@ default_state = {
         "minDriftPerMinute": 2,      # minimum drift per MINUTE when randomizing drift
         "maxDriftPerMinute": 4,      # maximum drift per MINUTE when randomizing drift
         "adjustUpAmount": 5,         # amount to adjust up per call
-        "adjustDownAmount": 0.5,     # amount to adjust down per call
+        "adjustDownAmount": 1,     # amount to adjust down per call
     }
 }
 
@@ -85,8 +86,17 @@ def logic(state, backend_change):
     print("{:.1f}\t{:.2f}\t{:+.2f}\t{:+.2f}\t{:.2f}".format(value, state["value"], state["brownNoiseValue"], sine, state["rndMagnitude"]))
     return state
 
+getAdjustment = None
 
-def getAdjustment(config):
+
+## Mock implementation
+
+def init_mock():
+    global getAdjustment
+    getAdjustment = getAdjustmentMock
+
+
+def getAdjustmentMock(config):
     c = keypress.pollChar(False)
     if c == "u":
         return config["adjustUpAmount"]
@@ -96,8 +106,53 @@ def getAdjustment(config):
         return None
 
 
+## Real implementation
+
+pi = None
+i2c_handle = None
+def init():
+    import pigpio
+    global pi
+    global getAdjustment
+    global i2c_handle
+
+    pi = pigpio.pi()
+    getAdjustment = getAdjustmentReal
+
+    i2c_handle = pi.i2c_open(1, 0x28)
+
+    pi.set_mode(SWITCH_GPIO_PIN, pigpio.INPUT)
+    pi.set_pull_up_down(SWITCH_GPIO_PIN, pigpio.PUD_UP)
+    pi.set_glitch_filter(SWITCH_GPIO_PIN, 200000) # Report change only after 200ms steady
+
+
+prev_gpio_value = 1
+def getAdjustmentReal(config):
+    global prev_gpio_value
+    p = readPressure()
+    if p > 110:
+        return -config["adjustDownAmount"]
+    
+    v = pi.read(SWITCH_GPIO_PIN)
+    if prev_gpio_value == 1 and v == 0:
+        prev_gpio_value = v
+        return config["adjustUpAmount"]
+    prev_gpio_value = v
+    return None
+
+
+def readPressure():
+    pressure_range = 206.843
+    (c, data) = pi.i2c_read_i2c_block_data(i2c_handle, 0x28, 2)
+    value = data[0]*256 + data[1]
+    percentage = (value / 0x3FFF)*100
+    kpa = ( percentage - 10 ) * pressure_range / 80
+    return kpa
+
 
 options = {
+    "init": init,
+    "init_mock": init_mock,
     "callback": logic,
     "run_interval": 1.0 / CALLS_PER_SECOND,
     "write_interval": 10,

@@ -63,10 +63,17 @@ class TaskBoxRunner:
         self._defaults(options)
         self._validate(options)
 
-        if options['mock']:
+        if options['mock_server']:
             self._box = MockTaskBox(options['id'], options.get('mock_init', {}), options.get('mock_print', False))
         else:
             self._box = TaskBox(options['id'])
+
+        if options['mock_pi']:
+            if options['init_mock']:
+                options['init_mock']()
+        else:
+            if options['init']:
+                options['init']()
 
         self._callback = options['callback']
         self.options = options
@@ -137,7 +144,8 @@ class TaskBoxRunner:
 
 
     def _defaults(self, options):
-        options['mock'] = options.get('mock', False)
+        options['mock_pi'] = options.get('mock_pi', False)
+        options['mock_server'] = options.get('mock_server', False)
         options['poll_interval'] = options.get('poll_interval', 10)
         options['write_interval'] = options.get('write_interval', 0)
 
@@ -159,7 +167,8 @@ class TaskBoxRunner:
     def _parse_command_line(self, options):
         parser = argparse.ArgumentParser(description='Task box startup')
         parser.add_argument('--id', help='Task box ID in backend')
-        parser.add_argument('--mock', action='store_true', help='Use mock backend')
+        parser.add_argument('--mock-pi', action='store_true', help='Use mock implementation instead of GPIO')
+        parser.add_argument('--mock-server', action='store_true', help='Use mock backend')
         parser.add_argument('--mock-init', help='Initial JSON state of mock')
         parser.add_argument('--mock-print', action='store_true', help='Print mock state changes')
         parser.add_argument('--run-interval', type=float, help='Override running interval (secs, float)')
@@ -167,16 +176,18 @@ class TaskBoxRunner:
         parser.add_argument('--write-interval', type=float, help='Override writing interval (secs, float)')
         args = parser.parse_args()
         if args.id:
-            options["id"] = args.id
-        if args.mock:
-            options["mock"] = True
+            options['id'] = args.id
+        if args.mock_pi:
+            options['mock_pi'] = True
+        if args.mock_server:
+            options['mock_server'] = True
         if args.mock_print:
-            options["mock_print"] = True
+            options['mock_print'] = True
         if args.mock_init:
-            options["mock_init"] = json.loads(args.mock_init)
+            options['mock_init'] = json.loads(args.mock_init)
         if args.run_interval:
-            options["run_interval"] = args.run_interval
+            options['run_interval'] = args.run_interval
         if args.poll_interval:
-            options["poll_interval"] = args.poll_interval
+            options['poll_interval'] = args.poll_interval
         if args.write_interval:
-            options["write_interval"] = args.write_interval
+            options['write_interval'] = args.write_interval
