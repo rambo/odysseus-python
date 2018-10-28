@@ -31,7 +31,7 @@ default_state = {
     "sinePosition": 0,      # sine wave position
     "config": {
         "maxRndMagnitude": 30,       # maximum white noise value when updating value
-        "rndMagnitudeDecay": 0.95,   # how fast random magnitude decays
+        "rndMagnitudeDecay": 0.97,   # how fast random magnitude decays (stabilation time: 0.95 ~5s, 0.97 ~10s)
         "brownNoiseSpeed": 0.1,      # magnitude how fast brown noise changes
         "brownNoiseMax": 10,         # maximum absolute value of brownian noise
         "sineMagnitude": 1,          # magnitude of sine wave
