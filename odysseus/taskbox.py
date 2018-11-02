@@ -16,6 +16,7 @@ class TaskBox:
         self.url = url
         self.debug = debug
         self.session = requests.Session()
+        self.version = 0 
         
         if proxy:
             self.session.proxies = {'http':proxy}
@@ -46,7 +47,7 @@ class TaskBox:
                     self.state = response_json['value']
                     self.version = response_json['version']
                 else:
-                    print ("Backend value json empty ( " + str(response_jsopn['value']) + " )")
+                    print ("Backend value json empty ( " + str(response_json['value']) + " )")
                 
                 if self.debug:
                         print ("Read from backend: " + response.text + " => " + str(self.state) + ", Version: " + self.version                                )
@@ -81,6 +82,9 @@ class TaskBox:
                     print ("Backend state not defined, using " + str(new_state))
         else:
             raise Exception('State read from server failed ( ' + r._status_code +')')
+
+        if be_version is None:
+            be_version = 0 
 
         if self.version < be_version:
             self.state = be_state
