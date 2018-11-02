@@ -1,6 +1,8 @@
 import copy
 import argparse
 import json
+import validators
+import requests
 from time import time, sleep
 from pathlib import Path
 
@@ -9,12 +11,100 @@ class ConcurrentModificationException(Exception):
 
 
 class TaskBox:
-    def __init__(self, id):
+    def __init__(self, id, url,initial_state,debug,proxy):
         self.id = id
+        self.url = url
+        self.debug = debug
+        self.session = requests.Session()
+        
+        if proxy:
+            self.session.proxies = {'http':proxy}
+            if self.debug:
+                print ("Using proxy: " + proxy)
+        
+        self.session.headers['Content-Type']  = "application/json"
+
+        if self.debug:
+            print ("Session to server established: " + self.url)
+        self.state = initial_state
+        self.version = 1 
+        if self.debug:
+            print ("Initial stage set to " + str(self.state) + ", version: " + str(self.version))
+        self.debug = debug
+    
+        self.write(self.state)
+
+
     def read(self):
-        raise Exception('NOT YET IMPLEMENTED')
+        response=self.session.get( self.url + "/engineering/box/" + self.id)
+        if response.status_code == requests.codes.ok:
+            if int(response.headers['content-length']) > 4:
+                response_json = json.loads(response.text)
+                
+
+                if str(response_json['value']) != '{"value":null}':
+                    self.state = response_json['value']
+                    self.version = response_json['version']
+                else:
+                    print ("Backend value json empty ( " + str(response_jsopn['value']) + " )")
+                
+                if self.debug:
+                        print ("Read from backend: " + response.text + " => " + str(self.state) + ", Version: " + self.version                                )
+                return self.state
+            else:
+                if self.debug:
+                        print ("Backend state not defined, state not changed")
+                return self.state
+        
+        else:
+            raise Exception('State read from server failed ( ' + response.status_code +')')
+    
     def write(self, new_state):
-        raise Exception('NOT YET IMPLEMENTED')
+        be_state = None
+        be_version = None
+
+        if new_state is not self.state:
+            self.version = int(self.version) + 1 
+            self.state = new_state
+
+        response=self.session.get( self.url + "/engineering/box/" + self.id)
+        if response.status_code == requests.codes.ok:
+            if int(response.headers['content-length']) > 4:
+                response_json = json.loads(response.text)
+                if response_json['value'] != '{"value":null}':
+                    be_state = response_json['value']
+                    be_version = int(response_json['version'])
+                    if self.debug:
+                        print ("Read from backend: " + response.text)
+            else:
+                    self.state = new_state
+                    print ("Backend state not defined, using " + str(new_state))
+        else:
+            raise Exception('State read from server failed ( ' + r._status_code +')')
+
+        if self.version < be_version:
+            self.state = be_state
+            if self.debug:
+                print ("Backend state changed, reverting to backend state. Version mismatch: " + str(be_version) + "(be) vs." +  str(self.version) + "(box)")
+                raise ConcurrentModificationException
+            
+
+        if self.version > be_version:
+            payload = '{ "id":"' + str(self.id) + '", "value":' + str(self.state).replace("'","\"") + ', "version":"' + str(self.version) + '"}'
+
+            if self.debug:
+                print ("Payload:" + payload)
+            
+            response = self.session.post( self.url + "/engineering/box/" + self.id, data=payload)
+
+            if self.debug:
+                print ("Write to backend: " + payload + " => " + response.text)
+
+            if response.status_code != requests.codes.ok:
+                 raise Exception('State write to server failed ( ' + str(response.status_code) +')')
+
+
+
 
 
 class MockTaskBox:
@@ -66,8 +156,8 @@ class TaskBoxRunner:
         if options['mock_server']:
             self._box = MockTaskBox(options['id'], options.get('mock_init', {}), options.get('mock_print', False))
         else:
-            self._box = TaskBox(options['id'])
-
+            self._box = TaskBox(options['id'],options['url'],options.get('initial_state',{}),options.get('print', False), options.get('proxy'))
+            
         if options['mock_pi']:
             if options['init_mock']:
                 options['init_mock']()
@@ -157,6 +247,9 @@ class TaskBoxRunner:
             raise Exception("'callback' is not defined")
         if 'run_interval' not in options:
             raise Exception("'run_interval' is not defined")
+#        if 'url' in options:
+#            if not validators.url(options['url']):
+#                raise Exception("Server url not valid")
 
     def _inc_time(self, t, increment):
         t = t + increment
@@ -174,6 +267,10 @@ class TaskBoxRunner:
         parser.add_argument('--run-interval', type=float, help='Override running interval (secs, float)')
         parser.add_argument('--poll-interval', type=float, help='Override polling interval (secs, float)')
         parser.add_argument('--write-interval', type=float, help='Override writing interval (secs, float)')
+        parser.add_argument('--url',  help='Define target serve base URL in format <protocol>://<ipaddress>:<port>')
+        parser.add_argument('--verbose', action='store_true', help='Print verbose messages during operation')
+        parser.add_argument('--proxy', help='Use proxy for connections')
+
         args = parser.parse_args()
         if args.id:
             options['id'] = args.id
@@ -191,3 +288,11 @@ class TaskBoxRunner:
             options['poll_interval'] = args.poll_interval
         if args.write_interval:
             options['write_interval'] = args.write_interval
+        if args.url:
+            options['url'] = args.url
+        if args.verbose:
+            options['print'] = True
+        if args.proxy:
+            options['proxy'] = args.proxy
+        
+        
