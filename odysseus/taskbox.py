@@ -81,7 +81,7 @@ class TaskBox:
                     self.state = new_state
                     print ("Backend state not defined, using " + str(new_state))
         else:
-            raise Exception('State read from server failed ( ' + r._status_code +')')
+            raise Exception('State read from server failed ( ' + response.status_code +')')
 
         if be_version is None:
             be_version = 0 
