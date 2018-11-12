@@ -4,33 +4,33 @@ import json
 from time import time, sleep
 from pathlib import Path
 
+_verbose = False
+
 class ConcurrentModificationException(Exception):
     pass
 
 
 class TaskBox:
-    def __init__(self, id, url,initial_state,debug,proxy):
+    def __init__(self, id, url,initial_state,proxy):
         import requests
         self.id = id
         self.url = url
-        self.debug = debug
         self.session = requests.Session()
         self.version = 0 
         
         if proxy:
             self.session.proxies = {'http':proxy}
-            if self.debug:
+            if _verbose:
                 print ("Using proxy: " + proxy)
         
         self.session.headers['Content-Type']  = "application/json"
 
-        if self.debug:
+        if _verbose:
             print ("Session to server established: " + self.url)
         self.state = initial_state
         self.version = 1 
-        if self.debug:
+        if _verbose:
             print ("Initial stage set to " + str(self.state) + ", version: " + str(self.version))
-        self.debug = debug
     
         self.write(self.state)
 
@@ -48,11 +48,11 @@ class TaskBox:
                 else:
                     print ("Backend value json empty ( " + str(response_json['value']) + " )")
                 
-                if self.debug:
+                if _verbose:
                         print ("Read from backend: " + response.text + " => " + str(self.state) + ", Version: " + self.version                                )
                 return self.state
             else:
-                if self.debug:
+                if _verbose:
                         print ("Backend state not defined, state not changed")
                 return self.state
         
@@ -74,7 +74,7 @@ class TaskBox:
                 if response_json['value'] != '{"value":null}':
                     be_state = response_json['value']
                     be_version = int(response_json['version'])
-                    if self.debug:
+                    if _verbose:
                         print ("Read from backend: " + response.text)
             else:
                     self.state = new_state
@@ -87,7 +87,7 @@ class TaskBox:
 
         if self.version < be_version:
             self.state = be_state
-            if self.debug:
+            if _verbose:
                 print ("Backend state changed, reverting to backend state. Version mismatch: " + str(be_version) + "(be) vs." +  str(self.version) + "(box)")
                 raise ConcurrentModificationException
             
@@ -95,12 +95,12 @@ class TaskBox:
         if self.version > be_version:
             payload = '{ "id":"' + str(self.id) + '", "value":' + str(self.state).replace("'","\"") + ', "version":"' + str(self.version) + '"}'
 
-            if self.debug:
+            if _verbose:
                 print ("Payload:" + payload)
             
             response = self.session.post( self.url + "/engineering/box/" + self.id, data=payload)
 
-            if self.debug:
+            if _verbose:
                 print ("Write to backend: " + payload + " => " + response.text)
 
             if response.status_code != requests.codes.ok:
@@ -111,10 +111,9 @@ class TaskBox:
 
 
 class MockTaskBox:
-    def __init__(self, id, initial_state, debug):
+    def __init__(self, id, initial_state):
         self.id = id
         self.state = initial_state
-        self.debug = debug
         self.mock_state_file = Path("backend-mock-" + id + ".json")
         print("Mock backend created, write to file '" + str(self.mock_state_file)
          + "' to change backend state")
@@ -122,22 +121,22 @@ class MockTaskBox:
     def read(self):
         new_backend_state = self._read_and_delete()
         if new_backend_state:
-            if self.debug:
+            if _verbose:
                 print("READ NEW MOCK BACKEND STATE")
             self.state = new_backend_state
-        if self.debug:
+        if _verbose:
             print("READ(" + self.id + "):  " + str(self.state))
         return self.state
 
     def write(self, new_state):
         new_backend_state = self._read_and_delete()
         if new_backend_state:
-            if self.debug:
+            if _verbose:
                 print("BACKEND STATE HAS CHANGED, CAUSING EXCEPTION")
             self.state = new_backend_state
             raise ConcurrentModificationException
         self.state = new_state
-        if self.debug:
+        if _verbose:
             print("WRITE(" + self.id + "): " + str(self.state))
 
     def _read_and_delete(self):
@@ -157,9 +156,9 @@ class TaskBoxRunner:
         self._validate(options)
 
         if options['mock_server']:
-            self._box = MockTaskBox(options['id'], options.get('mock_initial_state', {}), options.get('mock_print', False))
+            self._box = MockTaskBox(options['id'], options.get('mock_initial_state', {}))
         else:
-            self._box = TaskBox(options['id'],options['url'],options.get('initial_state',{}),options.get('print', False), options.get('proxy'))
+            self._box = TaskBox(options['id'], options['url'], options.get('initial_state',{}), options.get('proxy'))
             
         if options['mock_pi']:
             if options['init_mock']:
@@ -260,12 +259,13 @@ class TaskBoxRunner:
         return t
 
     def _parse_command_line(self, options):
+        global _verbose
+        
         parser = argparse.ArgumentParser(description='Task box startup')
         parser.add_argument('--id', help='Task box ID in backend')
         parser.add_argument('--mock-pi', action='store_true', help='Use mock implementation instead of GPIO')
         parser.add_argument('--mock-server', action='store_true', help='Use mock backend')
         parser.add_argument('--mock-init', help='Initial JSON state of mock')
-        parser.add_argument('--mock-print', action='store_true', help='Print mock state changes')
         parser.add_argument('--run-interval', type=float, help='Override running interval (secs, float)')
         parser.add_argument('--poll-interval', type=float, help='Override polling interval (secs, float)')
         parser.add_argument('--write-interval', type=float, help='Override writing interval (secs, float)')
@@ -280,8 +280,6 @@ class TaskBoxRunner:
             options['mock_pi'] = True
         if args.mock_server:
             options['mock_server'] = True
-        if args.mock_print:
-            options['mock_print'] = True
         if args.mock_init:
             options['mock_initial_state'] = json.loads(args.mock_init)
         if args.run_interval:
@@ -293,7 +291,7 @@ class TaskBoxRunner:
         if args.url:
             options['url'] = args.url
         if args.verbose:
-            options['print'] = True
+            _verbose = True
         if args.proxy:
             options['proxy'] = args.proxy
         
