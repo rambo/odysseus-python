@@ -1,7 +1,6 @@
 import copy
 import argparse
 import json
-import requests
 from time import time, sleep
 from pathlib import Path
 
@@ -11,6 +10,7 @@ class ConcurrentModificationException(Exception):
 
 class TaskBox:
     def __init__(self, id, url,initial_state,debug,proxy):
+        import requests
         self.id = id
         self.url = url
         self.debug = debug
