@@ -252,9 +252,6 @@ class TaskBoxRunner:
             raise Exception("'callback' is not defined")
         if 'run_interval' not in options:
             raise Exception("'run_interval' is not defined")
-#        if 'url' in options:
-#            if not validators.url(options['url']):
-#                raise Exception("Server url not valid")
 
     def _inc_time(self, t, increment):
         t = t + increment
