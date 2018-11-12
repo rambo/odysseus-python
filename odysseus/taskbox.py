@@ -1,7 +1,6 @@
 import copy
 import argparse
 import json
-import validators
 import requests
 from time import time, sleep
 from pathlib import Path
