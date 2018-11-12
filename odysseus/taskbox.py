@@ -157,7 +157,7 @@ class TaskBoxRunner:
         self._validate(options)
 
         if options['mock_server']:
-            self._box = MockTaskBox(options['id'], options.get('mock_init', {}), options.get('mock_print', False))
+            self._box = MockTaskBox(options['id'], options.get('mock_initial_state', {}), options.get('mock_print', False))
         else:
             self._box = TaskBox(options['id'],options['url'],options.get('initial_state',{}),options.get('print', False), options.get('proxy'))
             
@@ -241,6 +241,8 @@ class TaskBoxRunner:
         options['mock_server'] = options.get('mock_server', False)
         options['poll_interval'] = options.get('poll_interval', 10)
         options['write_interval'] = options.get('write_interval', 0)
+        options['init'] = options.get('init', None)
+        options['init_mock'] = options.get('init_mock', None)
 
 
     def _validate(self, options):
@@ -284,7 +286,7 @@ class TaskBoxRunner:
         if args.mock_print:
             options['mock_print'] = True
         if args.mock_init:
-            options['mock_init'] = json.loads(args.mock_init)
+            options['mock_initial_state'] = json.loads(args.mock_init)
         if args.run_interval:
             options['run_interval'] = args.run_interval
         if args.poll_interval:

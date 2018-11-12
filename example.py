@@ -4,7 +4,7 @@ from odysseus.taskbox import *
 import random
 import time
 
-# Usage:  python3 example.py --id myid --mock --mock-init '{"number":7}'
+# Usage:  python3 example.py --id myid --mock-server --mock-init '{"number":7}'
 
 def logic(state, backend_change):
     if state is not None:
@@ -17,16 +17,16 @@ def logic(state, backend_change):
     return state
 
 def box_init():
-    return
+    print("Init called")
 
 
 options = {
     "callback": logic,
     "run_interval": 0.3,
     "initial_state": { "number": 0 },
-    #    "write_interval": 2
-    "init":box_init,
-    "mock_init":box_init
+    # "write_interval": 2
+    # "init":box_init,
+    # "mock_init":box_init
 }
 
 TaskBoxRunner(options).run()
