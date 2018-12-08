@@ -3,6 +3,7 @@ import argparse
 import json
 from time import time, sleep
 from pathlib import Path
+import requests
 
 _verbose = False
 
@@ -11,8 +12,8 @@ class ConcurrentModificationException(Exception):
 
 
 class TaskBox:
-    def __init__(self, id, url,initial_state,proxy):
-        import requests
+    def __init__(self, id, url,initial_state,proxy,user,passwd):
+
         self.id = id
         self.url = url
         self.session = requests.Session()
@@ -22,7 +23,12 @@ class TaskBox:
             self.session.proxies = {'http':proxy}
             if _verbose:
                 print ("Using proxy: " + proxy)
-        
+
+        if user:
+            self.session.auth=(user,passwd)
+            if _verbose:
+                print("Using basic http auth")
+
         self.session.headers['Content-Type']  = "application/json"
 
         if _verbose:
@@ -57,7 +63,7 @@ class TaskBox:
                 return self.state
         
         else:
-            raise Exception('State read from server failed ( ' + response.status_code +')')
+            raise Exception('State read from server failed ( ' + str(response.status_code) +')')
     
     def write(self, new_state):
         be_state = None
@@ -80,7 +86,7 @@ class TaskBox:
                     self.state = new_state
                     print ("Backend state not defined, using " + str(new_state))
         else:
-            raise Exception('State read from server failed ( ' + response.status_code +')')
+            raise Exception('State read from server failed ( ' + str(response.status_code) +')')
 
         if be_version is None:
             be_version = 0 
@@ -158,7 +164,7 @@ class TaskBoxRunner:
         if options['mock_server']:
             self._box = MockTaskBox(options['id'], options.get('mock_initial_state', {}))
         else:
-            self._box = TaskBox(options['id'], options['url'], options.get('initial_state',{}), options.get('proxy'))
+            self._box = TaskBox(options['id'], options['url'], options.get('initial_state',{}), options.get('proxy'), options.get('user'),options.get('passwd'))
             
         if options['mock_pi']:
             if options['init_mock']:
@@ -272,6 +278,8 @@ class TaskBoxRunner:
         parser.add_argument('--url',  help='Define target serve base URL in format <protocol>://<ipaddress>:<port>')
         parser.add_argument('--verbose', action='store_true', help='Print verbose messages during operation')
         parser.add_argument('--proxy', help='Use proxy for connections')
+        parser.add_argument('--user', help='Username for basic http auth')
+        parser.add_argument('--passwd', help='Password for basic http auth')
 
         args = parser.parse_args()
         if args.id:
@@ -294,5 +302,15 @@ class TaskBoxRunner:
             _verbose = True
         if args.proxy:
             options['proxy'] = args.proxy
-        
+        if args.user:
+            if not args.passwd:
+                print('Password not defined for basic http authentication')
+                exit()
+            options['user'] = args.user
+            options['passwd'] = args.passwd
+        if args.passwd:
+            if not args.user:
+                print('Username not defined for basic http authentication')
+                exit()
+                    
         
