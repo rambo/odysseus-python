@@ -9,10 +9,11 @@ import time
 def logic(state, backend_change):
     if state is not None:
         if backend_change:
+            print(state)
             print("Backend changed to: number=" + str(state.get("number", None)))
         else:
             if random.random() > 0.5:
-                state["number"] = state["number"] + 1
+                state["number"] = int(state["number"]) + 1
                 print("number=" + str(state.get("number", None)))
     return state
 

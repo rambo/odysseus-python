@@ -13,14 +13,16 @@ class ConcurrentModificationException(Exception):
 
 class TaskBox:
     def __init__(self, id, url,initial_state,proxy,user,passwd):
-
-        self.id = id
+        self.state = dict() 
+        self.state['id'] = id
         self.url = url
         self.session = requests.Session()
-        self.version = 0 
+        self.state['version']  = 0
+        self.state['value'] = initial_state
         
         if proxy:
-            self.session.proxies = {'http':proxy}
+            self.session.proxies = {'http':proxy,'https':proxy}
+            self.session.verify = False 
             if _verbose:
                 print ("Using proxy: " + proxy)
 
@@ -33,81 +35,44 @@ class TaskBox:
 
         if _verbose:
             print ("Session to server established: " + self.url)
-        self.state = initial_state
-        self.version = 1 
+        self.state['version'] = 1
         if _verbose:
-            print ("Initial stage set to " + str(self.state) + ", version: " + str(self.version))
+            print ("Initial stage set to " + str(self.state))
     
-        self.write(self.state)
+        try:
+            self.write(self.state) 
+        except ConcurrentModificationException:
+            self.state = self.read()
+
 
 
     def read(self):
-        response=self.session.get( self.url + "/engineering/box/" + self.id)
+        response=self.session.get( self.url + "/engineering/box/" + self.state['id'] )
         if response.status_code == requests.codes.ok:
             if int(response.headers['content-length']) > 4:
                 response_json = json.loads(response.text)
-                
+                self.state = response_json
 
-                if str(response_json['value']) != '{"value":null}':
-                    self.state = response_json['value']
-                    self.version = response_json['version']
-                else:
-                    print ("Backend value json empty ( " + str(response_json['value']) + " )")
-                
                 if _verbose:
-                        print ("Read from backend: " + response.text + " => " + str(self.state) + ", Version: " + self.version                                )
+                        print ('Read from backend: ' + response.text + ' => ' + str(self.state))
                 return self.state
             else:
                 if _verbose:
                         print ("Backend state not defined, state not changed")
                 return self.state
-        
         else:
             raise Exception('State read from server failed ( ' + str(response.status_code) +')')
     
     def write(self, new_state):
-        be_state = None
-        be_version = None
+            #payload = json.dumps({k:self.state[k] for k in ('id','version','value') if k in self.state})
+            payload = json.dumps(self.state)
+            response = self.session.post( self.url + "/engineering/box/" + self.state['id'], data=payload)
 
-        if new_state is not self.state:
-            self.version = int(self.version) + 1 
-            self.state = new_state
-
-        response=self.session.get( self.url + "/engineering/box/" + self.id)
-        if response.status_code == requests.codes.ok:
-            if int(response.headers['content-length']) > 4:
-                response_json = json.loads(response.text)
-                if response_json['value'] != '{"value":null}':
-                    be_state = response_json['value']
-                    be_version = int(response_json['version'])
-                    if _verbose:
-                        print ("Read from backend: " + response.text)
-            else:
-                    self.state = new_state
-                    print ("Backend state not defined, using " + str(new_state))
-        else:
-            raise Exception('State read from server failed ( ' + str(response.status_code) +')')
-
-        if be_version is None:
-            be_version = 0 
-
-        if self.version < be_version:
-            self.state = be_state
             if _verbose:
-                print ("Backend state changed, reverting to backend state. Version mismatch: " + str(be_version) + "(be) vs." +  str(self.version) + "(box)")
+                print ("Write to backend: " + str(self.state) + " => " + response.text)
+
+            if response.status_code == requests.codes['conflict']:
                 raise ConcurrentModificationException
-            
-
-        if self.version > be_version:
-            payload = '{ "id":"' + str(self.id) + '", "value":' + str(self.state).replace("'","\"") + ', "version":"' + str(self.version) + '"}'
-
-            if _verbose:
-                print ("Payload:" + payload)
-            
-            response = self.session.post( self.url + "/engineering/box/" + self.id, data=payload)
-
-            if _verbose:
-                print ("Write to backend: " + payload + " => " + response.text)
 
             if response.status_code != requests.codes.ok:
                  raise Exception('State write to server failed ( ' + str(response.status_code) +')')
@@ -230,9 +195,10 @@ class TaskBoxRunner:
 
 
     def _call_callback(self, backend_change):
-        new_state = self._callback(copy.deepcopy(self._state), backend_change)
-        if new_state != None and new_state != self._state:
-            self._state = new_state
+        new_state = self._callback(copy.deepcopy(self._state['value']), backend_change)
+        if new_state != None and new_state != self._state['value']:
+            self._state['value'] = new_state
+            self._state['version'] = int(self._state['version']) + 1
             self._state_changed = True
 
 
