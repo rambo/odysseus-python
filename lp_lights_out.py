@@ -34,6 +34,16 @@ def print_grid(state):
             if state[str(button)] == 2:
                 lp.LedCtrlRaw(button, 0, 3)
 
+def set_limits(state):
+    for i in range(8):
+        for y in range(8):
+            if y < state['limits'][0] or y > state['limits'][1] or i*16 < state['limits'][2] or i*16 > state['limits'][3]:
+                button = y+i*16
+                state[str(button)] = 2
+    
+    return state 
+    
+
 
 
 def logic(state, backend_change):
@@ -41,6 +51,7 @@ def logic(state, backend_change):
 
     if backend_change:
         lp.Reset()
+        state=set_limits(state)
         print_grid(state)
 
     but = None
