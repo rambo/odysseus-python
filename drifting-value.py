@@ -144,6 +144,9 @@ def getAdjustmentReal(config):
 def readPressure():
     pressure_range = 206.843
     (c, data) = pi.i2c_read_i2c_block_data(i2c_handle, 0x28, 2)
+    if len(data) < 2:
+        print("COULD NOT READ BYTES FROM SENSOR")
+        return 0
     value = data[0]*256 + data[1]
     percentage = (value / 0x3FFF)*100
     kpa = ( percentage - 10 ) * pressure_range / 80
