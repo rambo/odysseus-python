@@ -10,15 +10,16 @@ _verbose = False
 class ConcurrentModificationException(Exception):
     pass
 
+class NetworkException(Exception):
+    pass
 
+
+# Server connector for reading / writing a taskbox
 class TaskBox:
-    def __init__(self, id, url,initial_state,proxy,user,passwd):
-        self.state = dict() 
-        self.state['id'] = id
+    def __init__(self, id, url, initial_state_value, proxy, user, passwd):
+        self.id = id
         self.url = url
         self.session = requests.Session()
-        self.state['version']  = 0
-        self.state['value'] = initial_state
         
         if proxy:
             self.session.proxies = {'http':proxy,'https':proxy}
@@ -27,64 +28,57 @@ class TaskBox:
                 print ("Using proxy: " + proxy)
 
         if user:
-            self.session.auth=(user,passwd)
+            self.session.auth = (user, passwd)
             if _verbose:
                 print("Using basic http auth")
 
         self.session.headers['Content-Type']  = "application/json"
 
         if _verbose:
-            print ("Session to server established: " + self.url)
-        self.state['version'] = 1
-        if _verbose:
-            print ("Initial stage set to " + str(self.state))
-    
-        try:
-            self.write(self.state) 
-        except ConcurrentModificationException:
-            self.state = self.read()
-
-
+            print("Session to server established: " + self.url)
 
     def read(self):
-        response=self.session.get( self.url + "/engineering/box/" + self.state['id'] )
-        if response.status_code == requests.codes.ok:
-            if int(response.headers['content-length']) > 4:
-                response_json = json.loads(response.text)
-                self.state = response_json
-
-                if _verbose:
-                        print ('Read from backend: ' + response.text + ' => ' + str(self.state))
-                return self.state
-            else:
-                if _verbose:
-                        print ("Backend state not defined, state not changed")
-                return self.state
-        else:
-            raise Exception('State read from server failed ( ' + str(response.status_code) +')')
-    
-    def write(self, new_state):
-            #payload = json.dumps({k:self.state[k] for k in ('id','version','value') if k in self.state})
-            payload = json.dumps(self.state)
-            response = self.session.post( self.url + "/engineering/box/" + self.state['id'], data=payload)
-
+        """Read state from server and return it. May raise NetworkException."""
+        try:
+            response = self.session.get(self.url + "/data/box/" + self.id)
+        except Exception as e:
+            raise NetworkException('State read from server failed (' + str(e) +')')
+        if response.status_code == 200:
+            state = json.loads(response.text)
             if _verbose:
-                print ("Write to backend: " + str(self.state) + " => " + response.text)
+                    print ('Read from backend: ' + str(state))
+            return state
+        else:
+            raise NetworkException('State read from server failed (' + str(response.status_code) +')')
+    
+    def write(self, state):
+        """Write state to server and return the new state. May raise NetworkException or ConcurrentModificationException."""
+        payload = json.dumps(state)
+        try:
+            response = self.session.post(self.url + "/data/box/" + self.id, data=payload)
+        except Exception as e:
+            raise NetworkException('State write to server failed (' + str(e) +')')
 
-            if response.status_code == requests.codes['conflict']:
-                raise ConcurrentModificationException
+        if _verbose:
+            print ("Write to backend:\n    " + str(state) + "\n  =>\n    " + response.text)
 
-            if response.status_code != requests.codes.ok:
-                 raise Exception('State write to server failed ( ' + str(response.status_code) +')')
+        if response.status_code == requests.codes.conflict:
+            raise ConcurrentModificationException
+
+        if response.status_code != requests.codes.ok:
+                raise NetworkException('State write to server failed (' + str(response.status_code) +')')
+
+        state = json.loads(response.text)
+        return state
 
 
 
 
-
+# Mock implementation of server taskbox
 class MockTaskBox:
-    def __init__(self, id, initial_state):
+    def __init__(self, id, initial_state_value):
         self.id = id
-        self.state = initial_state
+        self.state = initial_state_value
         self.mock_state_file = Path("backend-mock-" + id + ".json")
         print("Mock backend created, write to file '" + str(self.mock_state_file)
          + "' to change backend state")
@@ -109,6 +103,7 @@ class MockTaskBox:
         self.state = new_state
         if _verbose:
             print("WRITE(" + self.id + "): " + str(self.state))
+        return self.state
 
     def _read_and_delete(self):
         if self.mock_state_file.is_file():
@@ -119,18 +114,31 @@ class MockTaskBox:
         return None
 
 
-
+# Taskbox logic runner
+#
+# Usage:
+#
+# options = {
+#     "init": init,                     # init method
+#     "init_mock": init_mock,           # init method when using mock raspi
+#     "callback": logic,                # callback method
+#     "run_interval": secs,             # run logic this often
+#     "write_interval": 10,             # write every 10 secs
+#     "initial_state": default_state,   # default state if box not defined
+# }
+# TaskBoxRunner(options).run()
 class TaskBoxRunner:
     def __init__(self, options):
         self._parse_command_line(options)
         self._defaults(options)
         self._validate(options)
 
+        self._mock = options['mock_server']
         if options['mock_server']:
-            self._box = MockTaskBox(options['id'], options.get('mock_initial_state', {}))
+            self._box = MockTaskBox(options['id'], options.get('initial_state', {}))
         else:
-            self._box = TaskBox(options['id'], options['url'], options.get('initial_state',{}), options.get('proxy'), options.get('user'),options.get('passwd'))
-            
+            self._box = TaskBox(options['id'], options['url'], options.get('initial_state', {}), options.get('proxy'), options.get('user'),options.get('passwd'))
+        
         if options['mock_pi']:
             if options['init_mock']:
                 options['init_mock']()
@@ -171,34 +179,42 @@ class TaskBoxRunner:
 
 
     def _poll_backend(self):
-        read_state = self._box.read()  # FIXME: Handle network errors
-        if read_state == {} and self.options.get("initial_state", None):
-            # Set initial state
-            self._box.write(self.options["initial_state"])
-            read_state = self.options["initial_state"]
-        if read_state != self._previous_backend_state:
-            # State changed in backend server
-            self._state = read_state
-            self._previous_backend_state = read_state
-            self._state_changed = False
-            self._call_callback(True)
+        try:
+            read_state = self._box.read()  # FIXME: Handle network errors
+            if read_state == {} and self.options.get("initial_state", None):
+                # Set initial state
+                read_state = self._box.write(self.options["initial_state"])
+            if read_state != self._previous_backend_state:
+                # State changed in backend server
+                if _verbose:
+                    print("State changed in backend:\n    " + str(self._state) + "\n  =>\n    " + str(read_state))
+                self._state = read_state
+                self._previous_backend_state = read_state
+                self._state_changed = False
+                self._call_callback(True)
+        except NetworkException as err:
+            if self._state:
+                print("NETWORK ERROR: Could not read from backend: " + str(err))
+            else:
+                raise Exception("Could not read/write initial backend state: " + str(err))
 
 
     def _write_backend(self):
         try:
-            self._box.write(self._state)  # FIXME: Handle network errors
+            self._state = self._box.write(self._state)  # FIXME: Handle network errors
             self._previous_backend_state = self._state
             self._state_changed = False
         except ConcurrentModificationException:
             self._previous_backend_state = None
             self._poll_backend()
+        except NetworkException as err:
+            print("NETWORK ERROR: Could not write to backend: " + str(err))
 
 
     def _call_callback(self, backend_change):
-        new_state = self._callback(copy.deepcopy(self._state['value']), backend_change)
-        if new_state != None and new_state != self._state['value']:
-            self._state['value'] = new_state
-            self._state['version'] = int(self._state['version']) + 1
+        new_state = self._callback(copy.deepcopy(self._state), backend_change)
+        if new_state != None and new_state != self._state:
+            self._state = new_state
             self._state_changed = True
 
 
@@ -210,7 +226,7 @@ class TaskBoxRunner:
     def _defaults(self, options):
         options['mock_pi'] = options.get('mock_pi', False)
         options['mock_server'] = options.get('mock_server', False)
-        options['poll_interval'] = options.get('poll_interval', 10)
+        options['poll_interval'] = options.get('poll_interval', 10)  # FIXME: ~60s once Socket.io is in use
         options['write_interval'] = options.get('write_interval', 0)
         options['init'] = options.get('init', None)
         options['init_mock'] = options.get('init_mock', None)
@@ -237,7 +253,6 @@ class TaskBoxRunner:
         parser.add_argument('--id', help='Task box ID in backend')
         parser.add_argument('--mock-pi', action='store_true', help='Use mock implementation instead of GPIO')
         parser.add_argument('--mock-server', action='store_true', help='Use mock backend')
-        parser.add_argument('--mock-init', help='Initial JSON state of mock')
         parser.add_argument('--run-interval', type=float, help='Override running interval (secs, float)')
         parser.add_argument('--poll-interval', type=float, help='Override polling interval (secs, float)')
         parser.add_argument('--write-interval', type=float, help='Override writing interval (secs, float)')
@@ -254,8 +269,6 @@ class TaskBoxRunner:
             options['mock_pi'] = True
         if args.mock_server:
             options['mock_server'] = True
-        if args.mock_init:
-            options['mock_initial_state'] = json.loads(args.mock_init)
         if args.run_interval:
             options['run_interval'] = args.run_interval
         if args.poll_interval:
