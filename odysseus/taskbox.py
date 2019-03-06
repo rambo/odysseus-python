@@ -286,7 +286,7 @@ class TaskBoxRunner:
     def _defaults(self, options):
         options['mock_pi'] = options.get('mock_pi', False)
         options['mock_server'] = options.get('mock_server', False)
-        options['poll_interval'] = options.get('poll_interval', 10)  # FIXME: ~60s once Socket.io is in use
+        options['poll_interval'] = options.get('poll_interval', 60)
         options['write_interval'] = options.get('write_interval', 0)
         options['init'] = options.get('init', None)
         options['init_mock'] = options.get('init_mock', None)
