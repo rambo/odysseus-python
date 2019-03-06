@@ -4,6 +4,23 @@ import json
 from time import time, sleep
 from pathlib import Path
 import requests
+import threading
+import socketio
+
+
+# Implementation notes:
+#
+# - Uses Socket.io to receive immediate notification of changes on server-side
+#   - Does not use the received state as-is, instead immediately polls the server state.
+#     This is to avoid using stale backend state in race conditions where many changes
+#     are done quickly.
+#   - Received data is checked to have corresponding ID and version number greater than
+#     that received on last backend poll.
+# - Polls backend regularly (~60s) in case Socket.io for some reason doesn't work
+# - Write frequency can be throttled with `write_interval`
+# - If backend cannot be reached on startup, will cause script to fail.
+# - If backend connection is later lost, will continue using local state indefinitely.
+
 
 _verbose = False
 
@@ -19,6 +36,12 @@ class TaskBox:
     def __init__(self, id, url, initial_state_value, proxy, user, passwd):
         self.id = id
         self.url = url
+        self._setup_connection(proxy, user, passwd)
+        self._setup_socketio()
+        if _verbose:
+            print("Session to server established: " + self.url)
+
+    def _setup_connection(self, proxy, user, passwd):
         self.session = requests.Session()
         
         if proxy:
@@ -34,8 +57,31 @@ class TaskBox:
 
         self.session.headers['Content-Type']  = "application/json"
 
-        if _verbose:
-            print("Session to server established: " + self.url)
+
+    def _setup_socketio(self):
+        self.backend_event = threading.Event()
+        self.received_state = None
+        self.sio = socketio.Client()
+        self.sio.connect(self.url + '?data=/data/box/' + self.id, namespaces=['/data'])
+
+        @self.sio.on('dataUpdate', namespace='/data')
+        def on_message(type, id, data):
+            if _verbose:
+                print('dataUpdate event: ' + str(data))
+            self.received_state = data
+            self.backend_event.set()
+
+
+    def sleep(self, seconds):
+        """Wait for the provided number of seconds, returning immediately
+        if backend state changes. Returns the new state or None on timeout."""
+        if self.backend_event.wait(timeout=seconds):
+            state = self.received_state
+            self.received_state = None
+            self.backend_event.clear()
+            return state
+        return None
+
 
     def read(self):
         """Read state from server and return it. May raise NetworkException."""
@@ -82,6 +128,10 @@ class MockTaskBox:
         self.mock_state_file = Path("backend-mock-" + id + ".json")
         print("Mock backend created, write to file '" + str(self.mock_state_file)
          + "' to change backend state")
+
+    def sleep(self, seconds):
+        sleep(seconds)
+        return None
 
     def read(self):
         new_backend_state = self._read_and_delete()
@@ -154,7 +204,7 @@ class TaskBoxRunner:
         poll_interval = self.options['poll_interval']
         write_interval = self.options['write_interval']
 
-        self._previous_backend_state = None
+        self._previous_backend_state = {}
         self._state = None
         self._state_changed = False
 
@@ -163,7 +213,12 @@ class TaskBoxRunner:
         next_write_time = time()
 
         while True:
-            self._wait_until(min(next_run_time, next_poll_time))
+            if self._wait_until(min(next_run_time, next_poll_time)):
+                # This does a poll instead of using the data sent from socket.io to avoid
+                # using stale backend state in case many changes are done quickly.
+                next_poll_time = time()
+                if _verbose:
+                    print("Detected backend state change, will poll backend next")
 
             if time() >= next_poll_time:
                 self._poll_backend()
@@ -180,7 +235,7 @@ class TaskBoxRunner:
 
     def _poll_backend(self):
         try:
-            read_state = self._box.read()  # FIXME: Handle network errors
+            read_state = self._box.read()
             if read_state == {} and self.options.get("initial_state", None):
                 # Set initial state
                 read_state = self._box.write(self.options["initial_state"])
@@ -201,11 +256,11 @@ class TaskBoxRunner:
 
     def _write_backend(self):
         try:
-            self._state = self._box.write(self._state)  # FIXME: Handle network errors
+            self._state = self._box.write(self._state)
             self._previous_backend_state = self._state
             self._state_changed = False
         except ConcurrentModificationException:
-            self._previous_backend_state = None
+            self._previous_backend_state = {}
             self._poll_backend()
         except NetworkException as err:
             print("NETWORK ERROR: Could not write to backend: " + str(err))
@@ -218,9 +273,14 @@ class TaskBoxRunner:
             self._state_changed = True
 
 
+    # Returns True if detected backend state change during sleep
     def _wait_until(self, t):
         while (t > time()):
-            sleep(t - time())
+            state = self._box.sleep(t - time())
+            # Do some sanity checks on state for safety
+            if state and state.get('type', '') == 'box' and state.get('id', '') == self.options['id'] and state.get('version', 0) > self._previous_backend_state.get('version', 0):
+                return True
+        return False
 
 
     def _defaults(self, options):
@@ -239,6 +299,8 @@ class TaskBoxRunner:
             raise Exception("'callback' is not defined")
         if 'run_interval' not in options:
             raise Exception("'run_interval' is not defined")
+        if options.get('url', '').endswith('/'):
+            options['url'] = options['url'][:-1]
 
     def _inc_time(self, t, increment):
         t = t + increment
