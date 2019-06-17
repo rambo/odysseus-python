@@ -32,9 +32,10 @@ CALLS_PER_SECOND=2
 
 default_state = {
     "fuses": [],
+    "status": "initial",
     "config": {
-        "blowing": [2,  4, 15, 18, 22, 24,  9, 11, 7,  6, 13, 16],
-        "measure": [3, 14, 17, 27, 23, 10, 25,  8, 5, 12, 19, 26],
+        "blowing": [ 4, 15, 18, 22, 24,  9, 11, 7,  6, 13, 16, 20],
+        "measure": [14, 17, 27, 23, 10, 25,  8, 5, 12, 19, 26, 21],
     },
     "presets": {
         "blow_one": {
@@ -56,6 +57,7 @@ def logic(state, backend_change):
             state.pop("blow", None)
     
     state["fuses"] = read_fuses(state["config"]["measure"])
+    state["status"] = "broken" if (0 in state["fuses"]) else "fixed"
     return state
 
 
@@ -85,6 +87,7 @@ def blow_fuses(indexes, config):
     for i in indexes:
         if i >= 0 and i < len(config["blowing"]):
             pin = config["blowing"][i]
+            print("Blowing fuse #" + str(i) + " gpio pin " + str(pin))
             pi.set_mode(pin, pigpio.OUTPUT)
             pi.write(pin, 1)
             time.sleep(BLOW_TIME)
