@@ -112,45 +112,117 @@ rod_control_panel: # The board identifier
     pca9635RGBJBOL_boards: [ 0, 1 ] # Board addresses (aka ARDUBUS_PCA9635RGBJBOL_BOARDS)
     pca9635RGBJBOL_maps:
         0: # board address, upper "rod" leds
-            0: 22 # key is the requested index, value is the real index to send to the Arduino
-            1: 11 # FIXME: add aliases in same coordinate system as the rods/gauges
+            0:
+              pin: 22
+              alias: rod_0_2_led
+            1:
+              pin: 11
+              alias: rod_0_3_led
             2:
               pin: 23
-              alias: topleds_22-20
-            3: 8
-            4: 20
-            5: 9
-            6: 32
-            7: 10
-            8: 30
-            9: 3
-            10: 17
-            11: 6
-            12: 18
-            13: 7
-            14: 19
-            15: 24
-            16: 43
-            17: 15
-            18: 4
-            19: 16
-            20: 5
-            21: 44
-            22: 25
-            23: 37
-            24: 26
-            25: 12
-            26: 1
-            27: 13
-            28: 2
-            29: 41
-            30: 29
-            31: 28
-            32: 38
-            33: 0
-            34: 40
-            35: 31
-            36: 27
+              alias: rod_0_4_led
+            3:
+              pin: 8
+              alias: rod_1_1_led
+            4:
+              pin: 20
+              alias: rod_1_2_led
+            5:
+              pin: 9
+              alias: rod_1_3_led
+            6:
+              pin: 32
+              alias: rod_1_4_led
+            7:
+              pin: 10
+              alias: rod_1_5_led
+            8:
+              pin: 30
+              alias: rod_2_0_led
+            9:
+              pin: 3
+              alias: rod_2_1_led
+            10:
+              pin: 17
+              alias: rod_2_2_led
+            11:
+              pin: 6
+              alias: rod_2_3_led
+            12:
+              pin: 18
+              alias: rod_2_4_led
+            13:
+              pin: 7
+              alias: rod_2_5_led
+            14:
+              pin: 19
+              alias: rod_2_6_led
+            15:
+              pin: 34
+              alias: rod_3_0_led
+            16:
+              pin: 43
+              alias: rod_3_1_led
+            17:
+              pin: 15
+              alias: rod_3_2_led
+            18:
+              pin: 4
+              alias: rod_3_3_led
+            19:
+              pin: 16
+              alias: rod_3_4_led
+            20:
+              pin: 5
+              alias: rod_3_5_led
+            21:
+              pin: 44
+              alias: rod_3_6_led
+            22:
+              pin: 25
+              alias: rod_4_0_led
+            23:
+              pin: 37
+              alias: rod_4_1_led
+            24:
+              pin: 26
+              alias: rod_4_2_led
+            25:
+              pin: 12
+              alias: rod_4_3_led
+            26:
+              pin: 1
+              alias: rod_4_4_led
+            27:
+              pin: 13
+              alias: rod_4_5_led
+            28:
+              pin: 2
+              alias: rod_4_6_led
+            29:
+              pin: 41
+              alias: rod_5_1_led
+            30:
+              pin: 29
+              alias: rod_5_2_led
+            31:
+              pin: 28
+              alias: rod_5_3_led
+            32:
+              pin: 38
+              alias: rod_5_4_led
+            33:
+              pin: 0
+              alias: rod_5_5_led
+            34:
+              pin: 40
+              alias: rod_6_2_led
+            35:
+              pin: 31
+              alias: rod_6_3_led
+            36:
+              pin: 27
+              alias: rod_6_4_led
         1: # gauge led-clusters
             0: 11 # lower left, green
             1: 10
