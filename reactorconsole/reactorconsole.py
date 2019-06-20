@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Local logic for the "reactor console" """
+import asyncio
 import atexit
 import logging
 import os
@@ -9,7 +10,6 @@ import time
 import ardubus_core
 import ardubus_core.deviceconfig
 import ardubus_core.transport
-from ardubus_core.aiowrapper import AIOWrapper
 
 # This is F-UGLY but can't be helped, the framework is not packaged properly
 sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))  # isort:skip
@@ -18,6 +18,8 @@ from odysseus.taskbox import TaskBoxRunner  # isort:skip ; # pylint: disable=C04
 
 UPDATE_FPS = 25  # How often to call updates
 FORCE_UPDATE_INTERVAL = 1.0  # How often to force-update all states to HW
+GAUGE_TICK_SPEED = 1.0 / UPDATE_FPS / 10  # 10 seconds to run gauge from (normalized) end to end
+GAUGE_MAX_HW_VALUE = 170
 
 
 class ReactorState:
@@ -26,18 +28,26 @@ class ReactorState:
     serialpath = None
     devicesyml_path = None
     aliases = None
+    ardubus = None
     ardubus_transport = None
     gauge_directions = None
     gauge_values = None
+    topled_values = None
+    colorled_values = None
     last_full_update = 0
+    logger = None
 
     def __init__(self, serialpath='/dev/ttyUSB0', devicesyml_path='./ardubus_devices.yml', loglevel=logging.INFO):
+        self._aioloop = asyncio.get_event_loop()
         self.serialpath = serialpath
         self.devicesyml_path = devicesyml_path
-        self.aliases = None
+        self.aliases = {}
+        self.ardubus = {}
         self.ardubus_transport = None
         self.gauge_directions = {}
         self.gauge_values = {}
+        self.topled_values = {}
+        self.colorled_values = [0.0 for _ in range(32)]
         self.last_full_update = 0
 
         # init standard logging
@@ -50,21 +60,75 @@ class ReactorState:
         """Initialize ardubus transport"""
         self.logger.info("Initializing ardubus")
         ardubus_core.deviceconfig.load_devices_yml(self.devicesyml_path)
-        transport_aio = ardubus_core.transport.get(self.serialpath,
-                                                   ardubus_core.deviceconfig.FULL_CONFIG_MAP[self.ardubus_devicename])
-        transport_aio.events_callback = self.ardubus_callback
-        self.ardubus_transport = AIOWrapper(transport_aio)
+        # Shortcuts to configs
+        self.ardubus = ardubus_core.deviceconfig.FULL_CONFIG_MAP[self.ardubus_devicename]
+        self.aliases = ardubus_core.deviceconfig.ALIAS_MAP[self.ardubus_devicename]
+        # Init the serial transport
+        self.ardubus_transport = ardubus_core.transport.get(self.serialpath, self.ardubus)
+        # Register the callback
+        self.ardubus_transport.events_callback = self.ardubus_callback
 
     def _reset_console_values(self):
         """Reset all console values to default"""
         self.logger.debug('called')
-        # TODO: reset the expected state values to power-on defaults
+
+        for alias in self.aliases:
+            if alias.endswith('_gauge'):
+                self.gauge_values[alias] = 0.0
+                # Init the up/down switch states too
+                up_alias = alias.replace('_gauge', '_up')
+                dn_alias = alias.replace('_gauge', '_down')
+                self.gauge_directions[up_alias] = False
+                self.gauge_directions[dn_alias] = False
+                self.logger.debug('Initialized aliases {}'.format((alias, up_alias, dn_alias)))
+            if alias.endswith('_led'):
+                self.topled_values[alias] = 0.0
+                self.logger.debug('Initialized alias {}'.format(alias))
+
+        # The colored led clusters don't have aliases (yet, also maybe not super useful either)
+        self.colorled_values = [0.0 for _ in range(32)]
+        self.logger.debug('Initialized {} colorled values'.format(len(self.colorled_values)))
+
         self._do_full_update()
+
+    def _update_colorled_value(self, ledidx):
+        """Maps the normalized led value to the hw value and returns a coroutine that sends it"""
+        send_value = round(self.colorled_values[ledidx] * 255)
+        self.logger.debug('send_value={} (normalized was {})'.format(send_value, self.colorled_values[ledidx]))
+        # These have no aliases, we know that the colorleds are on board 1
+        return self.ardubus['pca9635RGBJBOL_maps'][1][ledidx]['PROXY'].set_value(send_value)
+
+    def _update_topled_value(self, alias):
+        """Maps the normalized led value to the hw value and returns a coroutine that sends it"""
+        send_value = round(self.topled_values[alias] * 255)
+        self.logger.debug('send_value={} (normalized was {})'.format(send_value, self.topled_values[alias]))
+        # NOTE! This is a coroutine
+        return self.aliases[alias]['PROXY'].set_value(send_value)
+
+    def _update_gauge_value(self, alias):
+        """Maps the normalized gauge value to the hw value and returns a coroutine that sends it"""
+        send_value = round(self.gauge_values[alias] * GAUGE_MAX_HW_VALUE)
+        self.logger.debug('send_value={} (normalized was {})'.format(send_value, self.gauge_values[alias]))
+        # NOTE! This is a coroutine
+        return self.aliases[alias]['PROXY'].set_value(send_value)
 
     def _do_full_update(self):
         """Send all values to HW"""
         self.logger.debug('called')
-        # TODO: loop through all the expected states and set them
+        # Keep track of what we need to do
+        run_coros = []
+        # Add all aliased values to the queue
+        for alias in self.aliases:
+            if alias.endswith('_gauge'):
+                run_coros.append(self._update_gauge_value(alias))
+            if alias.endswith('_led'):
+                run_coros.append(self._update_topled_value(alias))
+        # Add the nonaliased leds to queue
+        for idx, _ in enumerate(self.colorled_values):
+            run_coros.append(self._update_colorled_value(idx))
+        # Run all the jobs
+        self.logger.info('About to process {} commands'.format(len(run_coros)))
+        self._aioloop.run_until_complete(asyncio.gather(*run_coros))
         self.last_full_update = time.time()
 
     def ardubus_callback(self, event):
@@ -77,16 +141,24 @@ class ReactorState:
     def framework_update(self, state, backend_change):
         """Called by the odysseys framework periodically"""
         now = time.time()
-
-        # TODO: implement logic
-
+        # Keep track of what we need to do
+        run_coros = []
+        # Check if we are going to do full update anyway
+        full_update_pending = False
         if (now - self.last_full_update) > FORCE_UPDATE_INTERVAL:
+            full_update_pending = True
+
+        # TODO: implement logic, remember to add tasks to run_coros only if full_update_pending is False
+
+        if full_update_pending:
             self._do_full_update()
+        else:
+            self._aioloop.run_until_complete(asyncio.gather(*run_coros))
 
     def cleanup(self):
         """cleanup on quit"""
         self._reset_console_values()
-        self.ardubus_transport.quit()
+        self._aioloop.run_until_complete(self.ardubus_transport.quit())
 
 
 if __name__ == '__main__':
