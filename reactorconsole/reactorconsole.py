@@ -184,6 +184,8 @@ class ReactorState:
 
     def cleanup(self):
         """cleanup on quit"""
+        if not self.ardubus_transport:
+            return
         self._reset_console_values()
         self._aioloop.run_until_complete(self.ardubus_transport.quit())
 
