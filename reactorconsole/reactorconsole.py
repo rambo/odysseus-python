@@ -133,6 +133,10 @@ class ReactorState:
 
     def ardubus_callback(self, event):
         """Ardubus events callback"""
+        if event.alias in self.gauge_directions:
+            # active-low signalling, invert the value for nicer logic flow
+            self.gauge_directions[event.alias] = not event.state
+        # TODO add handling for the commit switch
 
     def framework_init(self):
         """Called by the odysseys framework on init"""
@@ -148,7 +152,30 @@ class ReactorState:
         if (now - self.last_full_update) > FORCE_UPDATE_INTERVAL:
             full_update_pending = True
 
-        # TODO: implement logic, remember to add tasks to run_coros only if full_update_pending is False
+        # TODO: implement missing logic, remember to add tasks to run_coros only if full_update_pending is False
+
+        # Move gauges
+        for gauge_alias in self.gauge_values:
+            up_alias = gauge_alias.replace('_gauge', '_up')
+            dn_alias = gauge_alias.replace('_gauge', '_down')
+            new_value = self.gauge_values[gauge_alias]
+            if self.gauge_directions[up_alias]:
+                new_value += GAUGE_TICK_SPEED
+            if self.gauge_directions[dn_alias]:
+                new_value -= GAUGE_TICK_SPEED
+            if self.gauge_directions[dn_alias] and self.gauge_directions[up_alias]:
+                self.logger.error('Aliases {} are both set, some swith is b0rked!'.format([up_alias, dn_alias]))
+                # It's a no-op, no need to check this alias further
+                continue
+            # Limit the values
+            if new_value < 0.0:
+                self.logger.debug('{} limited to 0.0'.format(gauge_alias))
+                new_value = 0.0
+            if new_value > 1.0:
+                self.logger.debug('{} limited to 1.0'.format(gauge_alias))
+                new_value = 1.0
+            if not full_update_pending and new_value != self.gauge_values[gauge_alias]:
+                run_coros.append(run_coros.append(self._update_gauge_value(gauge_alias)))
 
         if full_update_pending:
             self._do_full_update()
