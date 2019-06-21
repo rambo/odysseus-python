@@ -152,6 +152,8 @@ class ReactorState:  # pylint: disable=R0902
         self.ardubus_transport = ardubus_core.transport.get(self.serialpath, self.ardubus)
         # Register the callback
         self.ardubus_transport.events_callback = self.ardubus_callback
+        # Just spam commands without waiting for responses
+        self.ardubus_transport.command_wait_response = False
 
     @log_exceptions
     def _reset_console_values(self):
