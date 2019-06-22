@@ -290,6 +290,7 @@ class ReactorState:  # pylint: disable=R0902
         if self.ardubus_transport:
             self._reset_console_values()
             asyncio.get_event_loop().run_until_complete(self.ardubus_transport.quit())
+            self.ardubus_transport = None
         self.keep_running = False
         self.local_update_thread.join(5)
 
@@ -306,5 +307,12 @@ if __name__ == '__main__':
         'init': REACTORCONSOLE.framework_init,
         'run_interval': 1.0 / FRAMEWORK_UPDATE_FPS,
     }
-    # This will run forever
-    TaskBoxRunner(TASK_OPTIONS).run()
+    # Catch ctrl-c and do a clean shutdown (if the odysseys framework ever lets us, right now they override
+    # global exception handlers.
+    try:
+        # This will run forever
+        TaskBoxRunner(TASK_OPTIONS).run()
+    except KeyboardInterrupt:
+        REACTORCONSOLE.cleanup()
+        # If/when taskboxrunner is going to have clean shutdowns, add it here
+        sys.exit(0)
