@@ -5,7 +5,11 @@ import random
 import time
 import math
 import keypress
+import microdotphat
 
+# Prerequisite:
+#   sudo apt-get install python3-numpy python3-smbus
+#   pip3 install microdotphat
 # Usage:  python3 drifting-value.py --id myid --mock-pi --mock-server
 
 
@@ -21,7 +25,7 @@ import keypress
 
 CALLS_PER_SECOND=10
 
-SWITCH_GPIO_PIN=27
+SWITCH_GPIO_PIN=4
 
 default_state = {
     "value": 330.5,         # current "real" value
@@ -83,7 +87,11 @@ def logic(state, backend_change):
     value = state["value"] + state["brownNoiseValue"] + rnd + sine
 
     # display  actual  brown  sine  white-mag
-    print("{:.1f}\t{:.2f}\t{:+.2f}\t{:+.2f}\t{:.2f}".format(value, state["value"], state["brownNoiseValue"], sine, state["rndMagnitude"]))
+    #print("{:.1f}\t{:.2f}\t{:+.2f}\t{:+.2f}\t{:.2f}".format(value, state["value"], state["brownNoiseValue"], sine, state["rndMagnitude"]))
+
+    microdotphat.write_string("{:.2f}".format(value), kerning=False)
+    microdotphat.show()
+
     return state
 
 getAdjustment = None
@@ -118,6 +126,8 @@ def init():
 
     pi = pigpio.pi()
     getAdjustment = getAdjustmentReal
+
+    microdotphat.clear()
 
     i2c_handle = pi.i2c_open(1, 0x28)
 
