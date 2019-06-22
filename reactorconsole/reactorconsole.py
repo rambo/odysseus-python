@@ -24,6 +24,7 @@ LOCAL_UPDATE_FPS = 25  # How often the local logic loop does stuff
 FORCE_UPDATE_INTERVAL = 10.0  # How often to force-update all states to HW
 GAUGE_TICK_SPEED = (1.0 / LOCAL_UPDATE_FPS) / 10  # 10 seconds to run gauge from (normalized) end to end
 GAUGE_MAX_HW_VALUE = 180
+GAUGE_LEEWAY = GAUGE_TICK_SPEED * 4  # by how much the guage value can be off the backend expected
 
 
 def log_exceptions(func, re_raise=True):
@@ -83,6 +84,93 @@ class ReactorState:  # pylint: disable=R0902
         self.local_update_thread.run()
 
     @log_exceptions
+    def _local_update_loop_move_gauges(self, run_coros, full_update_pending):
+        """Handle the gauge update part"""
+        with self.event_state_lock:
+            # Move gauges
+            for gauge_alias in self.gauge_values:
+                up_alias = gauge_alias.replace('_gauge', '_up')
+                dn_alias = gauge_alias.replace('_gauge', '_down')
+                new_value = self.gauge_values[gauge_alias]
+                if self.gauge_directions[up_alias]:
+                    self.logger.debug('Moving {} UP'.format(gauge_alias))
+                    new_value = self.gauge_values[gauge_alias] + GAUGE_TICK_SPEED
+                if self.gauge_directions[dn_alias]:
+                    self.logger.debug('Moving {} DOWN'.format(gauge_alias))
+                    new_value = self.gauge_values[gauge_alias] - GAUGE_TICK_SPEED
+                if self.gauge_directions[dn_alias] and self.gauge_directions[up_alias]:
+                    self.logger.error('Aliases {} are both set, some swith is b0rked!'.format([up_alias, dn_alias]))
+                    # It's a no-op, no need to check this alias further
+                    continue
+                # Limit the values
+                if new_value < 0.0:
+                    self.logger.debug('{} limited to 0.0 (was {})'.format(gauge_alias, new_value))
+                    new_value = 0.0
+                if new_value > 1.0:
+                    self.logger.debug('{} limited to 1.0 (was {})'.format(gauge_alias, new_value))
+                    new_value = 1.0
+                if not full_update_pending and new_value != self.gauge_values[gauge_alias]:
+                    run_coros.append(self._update_gauge_value(gauge_alias))
+                # The actual hw update is executed later so this is fine.
+                self.gauge_values[gauge_alias] = new_value
+        return run_coros
+
+    @log_exceptions
+    def _gauge_within_expected(self, position, exp_value):
+        """Check if gauge is close enough to exepected value"""
+        gauge_alias = 'rod_{}_gauge'.format(position)
+
+        if gauge_alias not in self.gauge_values:
+            self.logger.error('No gauge {} defined'.format(gauge_alias))
+            return False
+
+        upper_bound = exp_value + GAUGE_LEEWAY
+        lower_bound = exp_value + GAUGE_LEEWAY
+        if lower_bound < self.gauge_values[gauge_alias] < upper_bound:
+            return True
+        return False
+
+    @log_exceptions
+    def _local_update_loop_check_gauges(self, run_coros, full_update_pending):
+        """Check backend expected vs current value and set the topleds accordingly"""
+        if not self.backend_state:
+            self.logger.warning('No backend state yet, aborting check')
+            return run_coros
+        if 'expected' not in self.backend_state:
+            self.logger.error('Key "expected" not in backend state, aborting check')
+            return run_coros
+
+        # Set defined topleds to values according to expectation
+        updated_leds = []
+        with self.backend_state_lock:
+            self.logger.debug('"expected" backend state: {}'.format(repr(self.backend_state['expected'])))
+            self.logger.debug('"lights" backend state: {}'.format(repr(self.backend_state['lights'])))
+            for position in self.backend_state['expected']:
+                if position not in self.backend_state['lights']:
+                    self.logger.error('No light state defined for expected position {}'.format(position))
+                    continue
+                exp_value = self.backend_state['expected'][position]
+                led_value = float(self.backend_state['lights'][position])
+                led_alias = 'rod_{}_led'.format(position)
+                if self._gauge_within_expected(position, exp_value):
+                    self.topled_values[led_alias] = led_value
+                else:
+                    self.topled_values[led_alias] = 1.0 - led_value
+                if not full_update_pending:
+                    run_coros.append(self._update_topled_value(led_alias))
+                updated_leds.append(led_alias)
+
+        # Turn all other topleds off
+        for alias in self.topled_values:
+            if alias in updated_leds:
+                continue
+            self.topled_values[alias] = 0.0
+            if not full_update_pending:
+                run_coros.append(self._update_topled_value(alias))
+
+        return run_coros
+
+    @log_exceptions
     def _local_update_loop(self):
         """Handle local interaction separate from the framework"""
         self.logger.setLevel(logging.DEBUG)
@@ -101,7 +189,6 @@ class ReactorState:  # pylint: disable=R0902
                 time.sleep(0)
                 continue
             last_iteration = now
-            # self.logger.debug('Iterating')
 
             # Keep track of what we need to do
             run_coros = []
@@ -110,35 +197,10 @@ class ReactorState:  # pylint: disable=R0902
             if (now - self.last_full_update) > FORCE_UPDATE_INTERVAL:
                 full_update_pending = True
 
-            # TODO: implement missing logic, remember to add tasks to run_coros only if full_update_pending is False
+            run_coros = self._local_update_loop_move_gauges(run_coros, full_update_pending)
+            run_coros = self._local_update_loop_check_gauges(run_coros, full_update_pending)
 
-            with self.event_state_lock:
-                # Move gauges
-                for gauge_alias in self.gauge_values:
-                    up_alias = gauge_alias.replace('_gauge', '_up')
-                    dn_alias = gauge_alias.replace('_gauge', '_down')
-                    new_value = self.gauge_values[gauge_alias]
-                    if self.gauge_directions[up_alias]:
-                        self.logger.debug('Moving {} UP'.format(gauge_alias))
-                        new_value = self.gauge_values[gauge_alias] + GAUGE_TICK_SPEED
-                    if self.gauge_directions[dn_alias]:
-                        self.logger.debug('Moving {} DOWN'.format(gauge_alias))
-                        new_value = self.gauge_values[gauge_alias] - GAUGE_TICK_SPEED
-                    if self.gauge_directions[dn_alias] and self.gauge_directions[up_alias]:
-                        self.logger.error('Aliases {} are both set, some swith is b0rked!'.format([up_alias, dn_alias]))
-                        # It's a no-op, no need to check this alias further
-                        continue
-                    # Limit the values
-                    if new_value < 0.0:
-                        self.logger.debug('{} limited to 0.0 (was {})'.format(gauge_alias, new_value))
-                        new_value = 0.0
-                    if new_value > 1.0:
-                        self.logger.debug('{} limited to 1.0 (was {})'.format(gauge_alias, new_value))
-                        new_value = 1.0
-                    if not full_update_pending and new_value != self.gauge_values[gauge_alias]:
-                        run_coros.append(self._update_gauge_value(gauge_alias))
-                    # The actual hw update is executed later so this is fine.
-                    self.gauge_values[gauge_alias] = new_value
+            # TODO: implement missing logic, remember to add tasks to run_coros only if full_update_pending is False
 
             if full_update_pending:
                 self._do_full_update()
