@@ -81,7 +81,7 @@ class ReactorState:  # pylint: disable=R0902
         # Init local update thread
         self.logger.info('Starting local update thread')
         self.local_update_thread = threading.Thread(target=self._local_update_loop)
-        self.local_update_thread.run()
+        self.local_update_thread.start()
 
     @log_exceptions
     def _local_update_loop_move_gauges(self, run_coros, full_update_pending):
@@ -173,8 +173,10 @@ class ReactorState:  # pylint: disable=R0902
     @log_exceptions
     def _local_update_loop(self):
         """Handle local interaction separate from the framework"""
-        self.logger.setLevel(logging.DEBUG)
         self.logger.debug('Called')
+        # Initialize asyncio eventloop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         # Init serial transport
         self._init_ardubus_transport()
         self.logger.debug('Wait for arduino to finish initializing')
@@ -332,11 +334,20 @@ class ReactorState:  # pylint: disable=R0902
     @log_exceptions
     def framework_update(self, state, backend_change):
         """Called by the odysseys framework periodically"""
-        self.logger.debug('called')
+        # self.logger.debug('called')
         with self.backend_state_lock:
-            if backend_change:
+            if backend_change or (state and not self.backend_state):
                 self.backend_state = state
                 self.logger.debug("Changed state from backend: {}".format(repr(state)))
+
+            # Set some basic state keys we expect to see elsewhere just to get rid of the warnings
+            if self.backend_state is None:
+                self.logger.warning('Setting hardcoded initial state since backend gave us None')
+                self.backend_state = {
+                    'expected': {},
+                    'lights': {},
+                }
+
             # Whether *we* changed the state
             state_changed = False
 
