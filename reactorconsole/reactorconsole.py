@@ -2,6 +2,7 @@
 """Local logic for the "reactor console" """
 import asyncio
 import atexit
+import enum
 import functools
 import logging
 import os
@@ -41,6 +42,15 @@ def log_exceptions(func, re_raise=True):
     return wrapped
 
 
+class CommitState(enum.IntEnum):
+    """Handle states of the commit switches"""
+    unintialized = 0
+    ready = 1
+    armed = 2
+    committed = 3
+    commit_sent = 4
+
+
 class ReactorState:  # pylint: disable=R0902
     """Keep track of the state without using fugly global variables"""
     ardubus_devicename = 'rod_control_panel'
@@ -62,6 +72,8 @@ class ReactorState:  # pylint: disable=R0902
     backend_state_lock = threading.Lock()
     global_led_dimming_factor = 1.0
     backend_state_changed_flag = False
+    commit_arm_state = CommitState.unintialized
+    toptext = ''
 
     def __init__(self, serialpath='/dev/ttyUSB0', devicesyml_path='./ardubus_devices.yml', loglevel=logging.INFO):
         self.serialpath = serialpath
@@ -94,11 +106,19 @@ class ReactorState:  # pylint: disable=R0902
                 dn_alias = gauge_alias.replace('_gauge', '_down')
                 new_value = self.gauge_values[gauge_alias]
                 if self.gauge_directions[up_alias]:
-                    self.logger.debug('Moving {} UP'.format(gauge_alias))
-                    new_value = self.gauge_values[gauge_alias] + GAUGE_TICK_SPEED
+                    if self.commit_arm_state >= CommitState.armed:
+                        self.logger.info('Trying to move {} but we are in armed stated {}'.format(
+                            gauge_alias, self.commit_arm_state))
+                    else:
+                        self.logger.debug('Moving {} UP'.format(gauge_alias))
+                        new_value = self.gauge_values[gauge_alias] + GAUGE_TICK_SPEED
                 if self.gauge_directions[dn_alias]:
-                    self.logger.debug('Moving {} DOWN'.format(gauge_alias))
-                    new_value = self.gauge_values[gauge_alias] - GAUGE_TICK_SPEED
+                    if self.commit_arm_state >= CommitState.armed:
+                        self.logger.info('Trying to move {} but we are in armed stated {}'.format(
+                            gauge_alias, self.commit_arm_state))
+                    else:
+                        self.logger.debug('Moving {} DOWN'.format(gauge_alias))
+                        new_value = self.gauge_values[gauge_alias] - GAUGE_TICK_SPEED
                 if self.gauge_directions[dn_alias] and self.gauge_directions[up_alias]:
                     self.logger.error('Aliases {} are both set, some swith is b0rked!'.format([up_alias, dn_alias]))
                     # It's a no-op, no need to check this alias further
@@ -143,8 +163,8 @@ class ReactorState:  # pylint: disable=R0902
 
         # Set defined topleds to values according to expectation
         with self.backend_state_lock:
-            self.logger.debug('"expected" backend state: {}'.format(repr(self.backend_state['expected'])))
-            self.logger.debug('"lights" backend state: {}'.format(repr(self.backend_state['lights'])))
+            # self.logger.debug('"expected" backend state: {}'.format(repr(self.backend_state['expected'])))
+            # self.logger.debug('"lights" backend state: {}'.format(repr(self.backend_state['lights'])))
             for position in self.backend_state['expected']:
                 if position not in self.backend_state['lights']:
                     self.logger.error('No light state defined for expected position {}'.format(position))
@@ -174,6 +194,8 @@ class ReactorState:  # pylint: disable=R0902
         self._reset_console_values()
         last_iteration = 0
         self.logger.debug('Starting loop')
+        handled_arm_state = None
+        previous_top_text = ''
         while self.keep_running:
             now = time.time()
             # wait for next iteration while yielding CPU & GIL
@@ -202,6 +224,18 @@ class ReactorState:  # pylint: disable=R0902
             run_coros = self._local_update_loop_move_gauges(run_coros, full_update_pending)
             run_coros = self._local_update_loop_check_gauges(run_coros, full_update_pending)
 
+            # Arming
+            if handled_arm_state != self.commit_arm_state:
+                with self.event_state_lock:
+                    if self.commit_arm_state == CommitState.ready:
+                        self.toptext = previous_top_text
+                    if self.commit_arm_state == CommitState.armed:
+                        previous_top_text = self.toptext
+                        self.toptext = '-----'  # We have very limited character support in 7-segment
+                handled_arm_state = self.commit_arm_state
+                if not full_update_pending:
+                    run_coros.append(self._update_toptext())
+
             # TODO: implement missing logic, remember to add tasks to run_coros only if full_update_pending is False
 
             if full_update_pending:
@@ -228,6 +262,7 @@ class ReactorState:  # pylint: disable=R0902
     def _reset_console_values(self):
         """Reset all console values to default"""
         self.logger.debug('called')
+        self.toptext = ''
 
         for alias in self.aliases:
             if alias.endswith('_gauge'):
@@ -251,6 +286,15 @@ class ReactorState:  # pylint: disable=R0902
         self.logger.debug('colorled_values: {}'.format(repr(self.colorled_values)))
 
         self._do_full_update()
+
+    @log_exceptions
+    def _update_toptext(self):
+        """Update the top-text"""
+        # Right-align the text, we know we always have only 5 chars in the actual display
+        send_value = '{:>5}'.format(self.toptext)
+        self.logger.debug('Setting text to "{}"'.format(send_value))
+        # NOTE! This is a coroutine
+        return self.ardubus['i2cascii_boards'][0]['PROXY'].set_value(send_value)
 
     @log_exceptions
     def _update_colorled_value(self, ledidx):
@@ -307,6 +351,8 @@ class ReactorState:  # pylint: disable=R0902
         # Add the nonaliased leds to queue
         for idx, _ in enumerate(self.colorled_values):
             run_coros.append(self._update_colorled_value(idx))
+        # Top-text/number
+        run_coros.append(self._update_toptext())
         # Run all the jobs
         self._handle_commands(run_coros)
         self.last_full_update = time.time()
@@ -322,7 +368,19 @@ class ReactorState:  # pylint: disable=R0902
                 self.gauge_directions[event.alias] = not event.state
                 return
 
-            # TODO add handling for the commit switch
+            if event.alias == 'commit_arm_key':
+                # Active-low signalling, this is idle
+                if event.state:
+                    self.commit_arm_state = CommitState.ready
+                # Arm only from idle
+                if not event.state and self.commit_arm_state < CommitState.armed:
+                    self.commit_arm_state = CommitState.armed
+                return
+            if event.alias == 'commit_push':
+                # Active low sigalling
+                if not event.state and self.commit_arm_state == CommitState.armed:
+                    self.commit_arm_state = CommitState.committed
+                return
 
             self.logger.warning('Unhandled event {}'.format(event))
 
