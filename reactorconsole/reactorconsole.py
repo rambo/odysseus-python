@@ -6,6 +6,7 @@ import enum
 import functools
 import logging
 import os
+import random
 import sys
 import threading
 import time
@@ -26,6 +27,7 @@ FORCE_UPDATE_INTERVAL = 10.0  # How often to force-update all states to HW
 GAUGE_TICK_SPEED = (1.0 / LOCAL_UPDATE_FPS) / 7.5  # 10 seconds to run gauge from (normalized) end to end
 GAUGE_MAX_HW_VALUE = 180
 GAUGE_LEEWAY = GAUGE_TICK_SPEED * 4  # by how much the guage value can be off the backend expected
+ARMED_TOP_TEXT = '-----'
 
 
 def log_exceptions(func, re_raise=True):
@@ -48,7 +50,8 @@ class CommitState(enum.IntEnum):
     ready = 1
     armed = 2
     committed = 3
-    commit_sent = 4
+    send_commit = 4
+    commit_sent = 5
 
 
 class ReactorState:  # pylint: disable=R0902
@@ -74,6 +77,8 @@ class ReactorState:  # pylint: disable=R0902
     backend_state_changed_flag = False
     commit_arm_state = CommitState.unintialized
     toptext = ''
+    gauges_match_expected = False
+    arm_previous_top_text = ''
 
     def __init__(self, serialpath='/dev/ttyUSB0', devicesyml_path='./ardubus_devices.yml', loglevel=logging.INFO):
         self.serialpath = serialpath
@@ -146,7 +151,9 @@ class ReactorState:  # pylint: disable=R0902
             return False
 
         upper_bound = exp_value + GAUGE_LEEWAY
-        lower_bound = exp_value + GAUGE_LEEWAY
+        lower_bound = exp_value - GAUGE_LEEWAY
+        # self.logger.debug('{} check {} < {} < {}'.format(gauge_alias, lower_bound,
+        #                                                  self.gauge_values[gauge_alias], upper_bound))
         if lower_bound < self.gauge_values[gauge_alias] < upper_bound:
             return True
         return False
@@ -154,6 +161,7 @@ class ReactorState:  # pylint: disable=R0902
     @log_exceptions
     def _local_update_loop_check_gauges(self, run_coros, full_update_pending):
         """Check backend expected vs current value and set the topleds accordingly"""
+        self.gauges_match_expected = True
         if not self.backend_state:
             self.logger.warning('No backend state yet, aborting check')
             return run_coros
@@ -176,8 +184,46 @@ class ReactorState:  # pylint: disable=R0902
                     self.topled_values[led_alias] = led_value
                 else:
                     self.topled_values[led_alias] = 1.0 - led_value
+                    self.gauges_match_expected = False
                 if not full_update_pending:
                     run_coros.append(self._update_topled_value(led_alias))
+        return run_coros
+
+    @log_exceptions
+    def _invalid_commit_punish(self, run_coros, full_update_pending):
+        """Punishment for invalid commit"""
+        self.logger.info('PUNISH!!!')
+        for alias in self.gauge_values:
+            backend_key = alias.replace('_gauge', '').replace('rod_', '')
+            if random.random() > 0.5 or backend_key in self.backend_state['expected']:
+                self.gauge_values[alias] = random.random()
+                if not full_update_pending:
+                    run_coros.append(self._update_gauge_value(alias))
+        return run_coros
+
+    @log_exceptions
+    def _local_update_loop_arm_commit(self, run_coros, full_update_pending):
+        """Handle arm and commit"""
+        with self.event_state_lock:
+            if self.commit_arm_state == CommitState.ready:
+                self.toptext = self.arm_previous_top_text
+                if not full_update_pending:
+                    run_coros.append(self._update_toptext())
+            if self.commit_arm_state == CommitState.armed:
+                self.arm_previous_top_text = self.toptext
+                self.toptext = ARMED_TOP_TEXT
+                if not full_update_pending:
+                    run_coros.append(self._update_toptext())
+            if self.commit_arm_state == CommitState.committed:
+                if not self.gauges_match_expected:
+                    run_coros = self._invalid_commit_punish(run_coros, full_update_pending)
+                else:
+                    self.commit_arm_state = CommitState.send_commit
+            if self.commit_arm_state == CommitState.commit_sent:
+                self.toptext = self.arm_previous_top_text
+                if not full_update_pending:
+                    run_coros.append(self._update_toptext())
+
         return run_coros
 
     @log_exceptions
@@ -195,7 +241,7 @@ class ReactorState:  # pylint: disable=R0902
         last_iteration = 0
         self.logger.debug('Starting loop')
         handled_arm_state = None
-        previous_top_text = ''
+        self.arm_previous_top_text = ''
         while self.keep_running:
             now = time.time()
             # wait for next iteration while yielding CPU & GIL
@@ -224,17 +270,10 @@ class ReactorState:  # pylint: disable=R0902
             run_coros = self._local_update_loop_move_gauges(run_coros, full_update_pending)
             run_coros = self._local_update_loop_check_gauges(run_coros, full_update_pending)
 
-            # Arming
+            # Arming and committing
             if handled_arm_state != self.commit_arm_state:
-                with self.event_state_lock:
-                    if self.commit_arm_state == CommitState.ready:
-                        self.toptext = previous_top_text
-                    if self.commit_arm_state == CommitState.armed:
-                        previous_top_text = self.toptext
-                        self.toptext = '-----'  # We have very limited character support in 7-segment
                 handled_arm_state = self.commit_arm_state
-                if not full_update_pending:
-                    run_coros.append(self._update_toptext())
+                run_coros = self._local_update_loop_arm_commit(run_coros, full_update_pending)
 
             # TODO: implement missing logic, remember to add tasks to run_coros only if full_update_pending is False
 
@@ -327,14 +366,14 @@ class ReactorState:  # pylint: disable=R0902
     def _handle_commands(self, run_coros):
         """Send and time ardubus commands"""
         now = time.time()
-        self.logger.info('About to process {} commands'.format(len(run_coros)))
+        self.logger.debug('About to process {} commands'.format(len(run_coros)))
         # asyncio.get_event_loop().run_until_complete(asyncio.gather(*run_coros))
         # these all depend on same lock so maybe better to handle them sequentially
         for coro in run_coros:
             asyncio.get_event_loop().run_until_complete(coro)
             time.sleep(0.002)  # Rate limit the spam since we don't wait for responses
         diff = round((time.time() - now) * 1000)
-        self.logger.info('Commands done in {}ms'.format(diff))
+        self.logger.debug('Commands done in {}ms'.format(diff))
 
     @log_exceptions
     def _do_full_update(self):
@@ -363,6 +402,10 @@ class ReactorState:  # pylint: disable=R0902
         with self.event_state_lock:
             if not isinstance(event, ardubus_core.events.Status):
                 self.logger.debug('Called with {}'.format(event))
+
+            if 'unused' in event.alias:
+                return
+
             if event.alias in self.gauge_directions:
                 # active-low signalling, invert the value for nicer logic flow
                 self.gauge_directions[event.alias] = not event.state
@@ -376,9 +419,10 @@ class ReactorState:  # pylint: disable=R0902
                 if not event.state and self.commit_arm_state < CommitState.armed:
                     self.commit_arm_state = CommitState.armed
                 return
+
             if event.alias == 'commit_push':
-                # Active low sigalling
-                if not event.state and self.commit_arm_state == CommitState.armed:
+                # Active-HIGH sigalling
+                if event.state and self.commit_arm_state == CommitState.armed:
                     self.commit_arm_state = CommitState.committed
                 return
 
@@ -392,8 +436,8 @@ class ReactorState:  # pylint: disable=R0902
     @log_exceptions
     def framework_update(self, state, backend_change):
         """Called by the odysseys framework periodically"""
-        # self.logger.debug('called')
         with self.backend_state_lock:
+            # self.logger.debug('called with state: {}'.format(repr(state)))
             if backend_change or (state and not self.backend_state):
                 self.backend_state = state
                 self.logger.debug("Changed state from backend: {}".format(repr(state)))
@@ -403,17 +447,20 @@ class ReactorState:  # pylint: disable=R0902
             if self.backend_state is None:
                 self.logger.warning('Setting hardcoded initial state since backend gave us None')
                 self.backend_state = {
-                    'expected': {},
-                    'lights': {},
+                    'expected': {'3_3': 0.5},
+                    'lights': {'3_3': True},
+                    'status': 'broken',
                 }
 
             # Whether *we* changed the state
             state_changed = False
-
-            # TODO: Check local vs expected state, return new state if we changed something
+            if self.commit_arm_state == CommitState.send_commit:
+                self.commit_arm_state = CommitState.commit_sent
+                self.backend_state['status'] = 'fixed'
+                state_changed = True
 
             if state_changed:
-                return state
+                return self.backend_state
             return None
 
     @log_exceptions
@@ -431,7 +478,7 @@ if __name__ == '__main__':
     # FIXME: Add way to give the config values via argparse without messing the odysseys framework
     REACTORCONSOLE = ReactorState()
     # Set debug only for our local logger
-    REACTORCONSOLE.logger.setLevel(logging.DEBUG)
+    # REACTORCONSOLE.logger.setLevel(logging.DEBUG)
     # Since the framework does not provide callbacks for clean shutdowns we must use ataxit as last resort
     atexit.register(REACTORCONSOLE.cleanup)
     TASK_OPTIONS = {
