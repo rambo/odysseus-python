@@ -24,7 +24,7 @@ from odysseus.taskbox import TaskBoxRunner  # isort:skip ; # pylint: disable=C04
 FRAMEWORK_UPDATE_FPS = 15  # How often to call updates
 LOCAL_UPDATE_FPS = 25  # How often the local logic loop does stuff
 FORCE_UPDATE_INTERVAL = 10.0  # How often to force-update all states to HW
-GAUGE_TICK_SPEED = (1.0 / LOCAL_UPDATE_FPS) / 7.5  # 10 seconds to run gauge from (normalized) end to end
+GAUGE_TICK_SPEED = (1.0 / LOCAL_UPDATE_FPS) / 7.5  # 7.5 seconds to run gauge from (normalized) end to end
 GAUGE_MAX_HW_VALUE = 180
 GAUGE_LEEWAY = GAUGE_TICK_SPEED * 4  # by how much the guage value can be off the backend expected
 ARMED_TOP_TEXT = '-----'
@@ -37,6 +37,7 @@ RED_LEDS_IDX = (
 RED_LEDS_DIM = 0.1
 COLORLED_DEFAULT_GLOBAL_DIM = 0.25
 BLINKENLICHTEN_DEFAULT = True
+JUMPING_GAUGE_DRIFT_SPEED = (1.0 / LOCAL_UPDATE_FPS) / 90  # 1.5 minutes to drift from full to down
 
 
 def log_exceptions(func, re_raise=True):
@@ -122,6 +123,12 @@ class ReactorState:  # pylint: disable=R0902
                 up_alias = gauge_alias.replace('_gauge', '_up')
                 dn_alias = gauge_alias.replace('_gauge', '_down')
                 new_value = self.gauge_values[gauge_alias]
+
+                if self.gauge_directions[dn_alias] and self.gauge_directions[up_alias]:
+                    self.logger.error('Aliases {} are both set, some swith is b0rked!'.format([up_alias, dn_alias]))
+                    # It's a no-op, no need to check this alias further
+                    continue
+
                 if self.gauge_directions[up_alias]:
                     if self.commit_arm_state >= CommitState.armed:
                         # TODO: indicate this somehow in the HW too (also for down direction)
@@ -130,17 +137,17 @@ class ReactorState:  # pylint: disable=R0902
                     else:
                         self.logger.debug('Moving {} UP'.format(gauge_alias))
                         new_value = self.gauge_values[gauge_alias] + GAUGE_TICK_SPEED
-                if self.gauge_directions[dn_alias]:
+                elif self.gauge_directions[dn_alias]:
                     if self.commit_arm_state >= CommitState.armed:
                         self.logger.info('Trying to move {} but we are in armed stated {}'.format(
                             gauge_alias, self.commit_arm_state))
                     else:
                         self.logger.debug('Moving {} DOWN'.format(gauge_alias))
                         new_value = self.gauge_values[gauge_alias] - GAUGE_TICK_SPEED
-                if self.gauge_directions[dn_alias] and self.gauge_directions[up_alias]:
-                    self.logger.error('Aliases {} are both set, some swith is b0rked!'.format([up_alias, dn_alias]))
-                    # It's a no-op, no need to check this alias further
-                    continue
+                elif self.backend_state.get('jumping', False):
+                    # If not actively controlled and jumping, slowly drift gauges down
+                    new_value = self.gauge_values[gauge_alias] - JUMPING_GAUGE_DRIFT_SPEED
+
                 # Limit the values
                 if new_value < 0.0:
                     self.logger.debug('{} limited to 0.0 (was {})'.format(gauge_alias, new_value))
@@ -148,6 +155,7 @@ class ReactorState:  # pylint: disable=R0902
                 if new_value > 1.0:
                     self.logger.debug('{} limited to 1.0 (was {})'.format(gauge_alias, new_value))
                     new_value = 1.0
+                # Schedule immediate update if needed
                 if not self.full_update_pending and new_value != self.gauge_values[gauge_alias]:
                     run_coros.append(self._update_gauge_value(gauge_alias))
                 # The actual hw update is executed later so this is fine.
