@@ -22,7 +22,7 @@ from odysseus.taskbox import TaskBoxRunner  # isort:skip ; # pylint: disable=C04
 FRAMEWORK_UPDATE_FPS = 15  # How often to call updates
 LOCAL_UPDATE_FPS = 25  # How often the local logic loop does stuff
 FORCE_UPDATE_INTERVAL = 10.0  # How often to force-update all states to HW
-GAUGE_TICK_SPEED = (1.0 / LOCAL_UPDATE_FPS) / 10  # 10 seconds to run gauge from (normalized) end to end
+GAUGE_TICK_SPEED = (1.0 / LOCAL_UPDATE_FPS) / 7.5  # 10 seconds to run gauge from (normalized) end to end
 GAUGE_MAX_HW_VALUE = 180
 GAUGE_LEEWAY = GAUGE_TICK_SPEED * 4  # by how much the guage value can be off the backend expected
 
@@ -61,6 +61,7 @@ class ReactorState:  # pylint: disable=R0902
     event_state_lock = threading.Lock()
     backend_state_lock = threading.Lock()
     global_led_dimming_factor = 1.0
+    backend_state_changed_flag = False
 
     def __init__(self, serialpath='/dev/ttyUSB0', devicesyml_path='./ardubus_devices.yml', loglevel=logging.INFO):
         self.serialpath = serialpath
@@ -141,7 +142,6 @@ class ReactorState:  # pylint: disable=R0902
             return run_coros
 
         # Set defined topleds to values according to expectation
-        updated_leds = []
         with self.backend_state_lock:
             self.logger.debug('"expected" backend state: {}'.format(repr(self.backend_state['expected'])))
             self.logger.debug('"lights" backend state: {}'.format(repr(self.backend_state['lights'])))
@@ -158,16 +158,6 @@ class ReactorState:  # pylint: disable=R0902
                     self.topled_values[led_alias] = 1.0 - led_value
                 if not full_update_pending:
                     run_coros.append(self._update_topled_value(led_alias))
-                updated_leds.append(led_alias)
-
-        # Turn all other topleds off
-        for alias in self.topled_values:
-            if alias in updated_leds:
-                continue
-            self.topled_values[alias] = 0.0
-            if not full_update_pending:
-                run_coros.append(self._update_topled_value(alias))
-
         return run_coros
 
     @log_exceptions
@@ -199,6 +189,16 @@ class ReactorState:  # pylint: disable=R0902
             if (now - self.last_full_update) > FORCE_UPDATE_INTERVAL:
                 full_update_pending = True
 
+            # Reset stuff that needs reset when backend state changes
+            if self.backend_state_changed_flag:
+                self.backend_state_changed_flag = False
+                # Top-leds
+                for alias in self.topled_values:
+                    self.topled_values[alias] = 0.0
+                    if not full_update_pending:
+                        run_coros.append(self._update_topled_value(alias))
+
+            # Other processing
             run_coros = self._local_update_loop_move_gauges(run_coros, full_update_pending)
             run_coros = self._local_update_loop_check_gauges(run_coros, full_update_pending)
 
@@ -339,6 +339,7 @@ class ReactorState:  # pylint: disable=R0902
             if backend_change or (state and not self.backend_state):
                 self.backend_state = state
                 self.logger.debug("Changed state from backend: {}".format(repr(state)))
+                self.backend_state_changed_flag = True
 
             # Set some basic state keys we expect to see elsewhere just to get rid of the warnings
             if self.backend_state is None:
