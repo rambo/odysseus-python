@@ -34,6 +34,9 @@ RED_LEDS_IDX = (
     20, 21, 22, 23,
     28, 29, 30, 31,
 )
+RED_LEDS_DIM = 0.1
+COLORLED_DEFAULT_GLOBAL_DIM = 0.25
+BLINKENLICHTEN_DEFAULT = True
 
 
 def log_exceptions(func, re_raise=True):
@@ -80,14 +83,13 @@ class ReactorState:  # pylint: disable=R0902
     event_state_lock = threading.Lock()
     backend_state_lock = threading.Lock()
     global_led_dimming_factor = 1.0
-    colorled_global_dimming = 0.25
-    colorled_red_dimming = 0.10
+    colorled_global_dimming = COLORLED_DEFAULT_GLOBAL_DIM
     backend_state_changed_flag = False
     commit_arm_state = CommitState.unintialized
     toptext = ''
     gauges_match_expected = False
     arm_previous_top_text = ''
-    use_random_blinkenlichten = True
+    use_random_blinkenlichten = BLINKENLICHTEN_DEFAULT
 
     def __init__(self, serialpath='/dev/ttyUSB0', devicesyml_path='./ardubus_devices.yml', loglevel=logging.INFO):
         self.serialpath = serialpath
@@ -296,6 +298,9 @@ class ReactorState:  # pylint: disable=R0902
                     self.topled_values[alias] = 0.0
                     if not full_update_pending:
                         run_coros.append(self._update_topled_value(alias))
+                # Stop random blink when we're broken (fixed state resets this in the framework update method)
+                if self.backend_state.get('status', 'undef') == 'broken':
+                    self.use_random_blinkenlichten = False
 
             # Other processing
             run_coros = self._local_update_loop_move_gauges(run_coros, full_update_pending)
@@ -386,7 +391,7 @@ class ReactorState:  # pylint: disable=R0902
         """Maps the normalized led value to the hw value and returns a coroutine that sends it"""
         dimmed = self.colorled_values[ledidx] * self.global_led_dimming_factor * self.colorled_global_dimming
         if ledidx in RED_LEDS_IDX:
-            dimmed = dimmed * self.colorled_red_dimming
+            dimmed = dimmed * RED_LEDS_DIM
         send_value = round(dimmed * 255)
         self.logger.debug('#{} send_value={} (normalized was {:0.3f})'.format(ledidx, send_value, dimmed))
         # These have no aliases, we know that the colorleds are on board 1
@@ -507,6 +512,7 @@ class ReactorState:  # pylint: disable=R0902
             if self.commit_arm_state == CommitState.send_commit:
                 self.commit_arm_state = CommitState.commit_sent
                 self.backend_state['status'] = 'fixed'
+                self.use_random_blinkenlichten = BLINKENLICHTEN_DEFAULT
                 state_changed = True
 
             if state_changed:
