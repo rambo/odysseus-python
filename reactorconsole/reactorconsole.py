@@ -538,6 +538,7 @@ class ReactorState:  # pylint: disable=R0902
                     'lights': {'3_3': True},
                     'status': 'broken',
                 }
+                self.backend_state_changed_flag = True
 
             # Whether *we* changed the state
             state_changed = False
