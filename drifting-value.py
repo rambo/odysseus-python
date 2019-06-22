@@ -34,6 +34,8 @@ default_state = {
     "drift": 3,             # value drift per MINUTE
     "driftPause": 0,        # drift pause secs remaining
     "sinePosition": 0,      # sine wave position
+    "minDriftPerMinute": 2, # minimum drift per MINUTE when randomizing drift
+    "maxDriftPerMinute": 4, # maximum drift per MINUTE when randomizing drift
     "config": {
         "maxRndMagnitude": 30,       # maximum white noise value when updating value
         "rndMagnitudeDecay": 0.95,   # how fast random magnitude decays (stabilation time: 0.95 ~5s, 0.97 ~10s)
@@ -42,10 +44,8 @@ default_state = {
         "sineMagnitude": 1,          # magnitude of sine wave
         "sineSpeed": 60,             # sine cycle time in seconds
         "driftDelayAfterAdjust": 60, # number of secs to pause drift after adjustment is done
-        "minDriftPerMinute": 2,      # minimum drift per MINUTE when randomizing drift
-        "maxDriftPerMinute": 4,      # maximum drift per MINUTE when randomizing drift
-        "adjustUpAmount": 5,         # amount to adjust up per call
-        "adjustDownAmount": 1,     # amount to adjust down per call
+        "adjustUpAmount": 0.3,       # amount to adjust up per call (pressure rise)
+        "adjustDownAmount": 1,       # amount to adjust down per call (pressure release)
     }
 }
 
@@ -75,7 +75,7 @@ def logic(state, backend_change):
         state["value"] += adjustment
         state["driftPause"] = config["driftDelayAfterAdjust"]
         state["rndMagnitude"] = config["maxRndMagnitude"]
-        state["drift"] = random.uniform(config["minDriftPerMinute"], config["maxDriftPerMinute"])
+        state["drift"] = random.uniform(state["minDriftPerMinute"], state["maxDriftPerMinute"])
         if random.random() < 0.5:
             state["drift"] = -state["drift"]
 
@@ -136,18 +136,14 @@ def init():
     pi.set_glitch_filter(SWITCH_GPIO_PIN, 200000) # Report change only after 200ms steady
 
 
-prev_gpio_value = 1
 def getAdjustmentReal(config):
-    global prev_gpio_value
     p = readPressure()
     if p > 110:
         return -config["adjustDownAmount"]
     
     v = pi.read(SWITCH_GPIO_PIN)
-    if prev_gpio_value == 1 and v == 0:
-        prev_gpio_value = v
+    if v == 0:
         return config["adjustUpAmount"]
-    prev_gpio_value = v
     return None
 
 
