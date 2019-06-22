@@ -90,6 +90,7 @@ class ReactorState:  # pylint: disable=R0902
     gauges_match_expected = False
     arm_previous_top_text = ''
     use_random_blinkenlichten = BLINKENLICHTEN_DEFAULT
+    full_update_pending = False
 
     def __init__(self, serialpath='/dev/ttyUSB0', devicesyml_path='./ardubus_devices.yml', loglevel=logging.INFO):
         self.serialpath = serialpath
@@ -113,7 +114,7 @@ class ReactorState:  # pylint: disable=R0902
         self.local_update_thread.start()
 
     @log_exceptions
-    def _local_update_loop_move_gauges(self, run_coros, full_update_pending):
+    def _local_update_loop_move_gauges(self, run_coros):
         """Handle the gauge update part"""
         with self.event_state_lock:
             # Move gauges
@@ -146,7 +147,7 @@ class ReactorState:  # pylint: disable=R0902
                 if new_value > 1.0:
                     self.logger.debug('{} limited to 1.0 (was {})'.format(gauge_alias, new_value))
                     new_value = 1.0
-                if not full_update_pending and new_value != self.gauge_values[gauge_alias]:
+                if not self.full_update_pending and new_value != self.gauge_values[gauge_alias]:
                     run_coros.append(self._update_gauge_value(gauge_alias))
                 # The actual hw update is executed later so this is fine.
                 self.gauge_values[gauge_alias] = new_value
@@ -170,7 +171,7 @@ class ReactorState:  # pylint: disable=R0902
         return False
 
     @log_exceptions
-    def _local_update_loop_check_gauges(self, run_coros, full_update_pending):
+    def _local_update_loop_check_gauges(self, run_coros):
         """Check backend expected vs current value and set the topleds accordingly"""
         self.gauges_match_expected = True
         if not self.backend_state:
@@ -196,12 +197,12 @@ class ReactorState:  # pylint: disable=R0902
                 else:
                     self.topled_values[led_alias] = 1.0 - led_value
                     self.gauges_match_expected = False
-                if not full_update_pending:
+                if not self.full_update_pending:
                     run_coros.append(self._update_topled_value(led_alias))
         return run_coros
 
     @log_exceptions
-    async def _invalid_commit_punish(self, full_update_pending):
+    async def _invalid_commit_punish(self):
         """Punishment for invalid commit"""
         self.logger.info('PUNISH!!!')
         # Randomize gauge values
@@ -210,7 +211,7 @@ class ReactorState:  # pylint: disable=R0902
             backend_key = alias.replace('_gauge', '').replace('rod_', '')
             if random.random() > 0.5 or backend_key in self.backend_state['expected']:
                 self.gauge_values[alias] = random.random()
-                if not full_update_pending:
+                if not self.full_update_pending:
                     run_commands.append(self._update_gauge_value(alias))
         asyncio.create_task(self._handle_commands(run_commands))
         # Red LEDs pulse-effect
@@ -222,39 +223,41 @@ class ReactorState:  # pylint: disable=R0902
             fade_value = 1.0 - (1.0 / fade_steps) * step
             for ledidx in RED_LEDS_IDX:
                 self.colorled_values[ledidx] = fade_value
-                run_commands.append(self._update_colorled_value(ledidx))
-            asyncio.create_task(self._handle_commands(run_commands))
+                if not self.full_update_pending:
+                    run_commands.append(self._update_colorled_value(ledidx))
+            if not self.full_update_pending:
+                asyncio.create_task(self._handle_commands(run_commands))
             await asyncio.sleep(fade_time / fade_steps)
         # Restore previous blinker state
         self.use_random_blinkenlichten = blinker_backup
 
     @log_exceptions
-    def _local_update_loop_arm_commit(self, run_coros, full_update_pending):
+    def _local_update_loop_arm_commit(self, run_coros):
         """Handle arm and commit"""
         with self.event_state_lock:
             if self.commit_arm_state == CommitState.ready:
                 self.toptext = self.arm_previous_top_text
-                if not full_update_pending:
+                if not self.full_update_pending:
                     run_coros.append(self._update_toptext())
             if self.commit_arm_state == CommitState.armed:
                 self.arm_previous_top_text = self.toptext
                 self.toptext = ARMED_TOP_TEXT
-                if not full_update_pending:
+                if not self.full_update_pending:
                     run_coros.append(self._update_toptext())
             if self.commit_arm_state == CommitState.committed:
                 if not self.gauges_match_expected:
-                    asyncio.create_task(self._invalid_commit_punish(full_update_pending))
+                    asyncio.create_task(self._invalid_commit_punish())
                 else:
                     self.commit_arm_state = CommitState.send_commit
             if self.commit_arm_state == CommitState.commit_sent:
                 self.toptext = self.arm_previous_top_text
-                if not full_update_pending:
+                if not self.full_update_pending:
                     run_coros.append(self._update_toptext())
 
         return run_coros
 
     @log_exceptions
-    def _local_update_loop_blinkenlighten(self, run_coros, full_update_pending):
+    def _local_update_loop_blinkenlighten(self, run_coros):
         """Blink the gauge LEDs randomly"""
         for idx, current_val in enumerate(self.colorled_values):
             if random.random() > 0.10:
@@ -263,7 +266,7 @@ class ReactorState:  # pylint: disable=R0902
                 self.colorled_values[idx] = 0.0
             else:
                 self.colorled_values[idx] = random.choice((0.25, 0.5, 1.0))
-            if not full_update_pending:
+            if not self.full_update_pending:
                 run_coros.append(self._update_colorled_value(idx))
         return run_coros
 
@@ -286,9 +289,9 @@ class ReactorState:  # pylint: disable=R0902
             # Keep track of what we need to do
             run_coros = []
             # Check if we are going to do full update anyway
-            full_update_pending = False
+            self.full_update_pending = False
             if (now - self.last_full_update) > FORCE_UPDATE_INTERVAL:
-                full_update_pending = True
+                self.full_update_pending = True
 
             # Reset stuff that needs reset when backend state changes
             if self.backend_state_changed_flag:
@@ -296,24 +299,24 @@ class ReactorState:  # pylint: disable=R0902
                 # Top-leds
                 for alias in self.topled_values:
                     self.topled_values[alias] = 0.0
-                    if not full_update_pending:
+                    if not self.full_update_pending:
                         run_coros.append(self._update_topled_value(alias))
                 # Stop random blink when we're broken (fixed state resets this in the framework update method)
                 if self.backend_state.get('status', 'undef') == 'broken':
                     self.use_random_blinkenlichten = False
 
             # Other processing
-            run_coros = self._local_update_loop_move_gauges(run_coros, full_update_pending)
-            run_coros = self._local_update_loop_check_gauges(run_coros, full_update_pending)
+            run_coros = self._local_update_loop_move_gauges(run_coros)
+            run_coros = self._local_update_loop_check_gauges(run_coros)
             if self.use_random_blinkenlichten:
-                run_coros = self._local_update_loop_blinkenlighten(run_coros, full_update_pending)
+                run_coros = self._local_update_loop_blinkenlighten(run_coros)
 
             # Arming and committing
             if handled_arm_state != self.commit_arm_state:
                 handled_arm_state = self.commit_arm_state
-                run_coros = self._local_update_loop_arm_commit(run_coros, full_update_pending)
+                run_coros = self._local_update_loop_arm_commit(run_coros)
 
-            if full_update_pending:
+            if self.full_update_pending:
                 asyncio.create_task(self._do_full_update())
             elif run_coros:
                 asyncio.create_task(self._handle_commands(run_coros))
