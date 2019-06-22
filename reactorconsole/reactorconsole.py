@@ -213,7 +213,8 @@ class ReactorState:  # pylint: disable=R0902
                 self.gauge_values[alias] = random.random()
                 if not self.full_update_pending:
                     run_commands.append(self._update_gauge_value(alias))
-        asyncio.create_task(self._handle_commands(run_commands))
+        if run_commands:
+            asyncio.create_task(self._handle_commands(run_commands))
         # Red LEDs pulse-effect
         blinker_backup = self.use_random_blinkenlichten
         fade_steps = 50
@@ -225,7 +226,7 @@ class ReactorState:  # pylint: disable=R0902
                 self.colorled_values[ledidx] = fade_value
                 if not self.full_update_pending:
                     run_commands.append(self._update_colorled_value(ledidx))
-            if not self.full_update_pending:
+            if run_commands:
                 asyncio.create_task(self._handle_commands(run_commands))
             await asyncio.sleep(fade_time / fade_steps)
         # Restore previous blinker state
@@ -271,6 +272,32 @@ class ReactorState:  # pylint: disable=R0902
         return run_coros
 
     @log_exceptions
+    async def _enter_broken_effect(self):
+        """Fade out the gauge LEDs when we enter broken state"""
+        fade_steps = 50
+        fade_time = 1.0
+        dim_backup = self.colorled_global_dimming
+        for step in range(fade_steps):
+            run_commands = []
+            fade_value = dim_backup - (dim_backup / fade_steps) * step
+            self.colorled_global_dimming = fade_value
+            for ledidx, _ in enumerate(self.colorled_values):
+                if not self.full_update_pending:
+                    run_commands.append(self._update_colorled_value(ledidx))
+            if run_commands:
+                asyncio.create_task(self._handle_commands(run_commands))
+            await asyncio.sleep(fade_time / fade_steps)
+        # Set all LEDS off and restore global dimming
+        run_commands = []
+        for ledidx, _ in enumerate(self.colorled_values):
+            self.colorled_values[ledidx] = 0.0
+            if not self.full_update_pending:
+                run_commands.append(self._update_colorled_value(ledidx))
+        if run_commands:
+            asyncio.create_task(self._handle_commands(run_commands))
+        self.colorled_global_dimming = dim_backup
+
+    @log_exceptions
     async def _local_update_loop(self):
         """Coroutine that runs the main hw update loop"""
         await self._reset_console_values()
@@ -304,6 +331,7 @@ class ReactorState:  # pylint: disable=R0902
                 # Stop random blink when we're broken (fixed state resets this in the framework update method)
                 if self.backend_state.get('status', 'undef') == 'broken':
                     self.use_random_blinkenlichten = False
+                    asyncio.create_task(self._enter_broken_effect())
 
             # Other processing
             run_coros = self._local_update_loop_move_gauges(run_coros)
