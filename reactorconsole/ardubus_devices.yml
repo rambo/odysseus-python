@@ -35,7 +35,7 @@ rod_control_panel: # The board identifier
               correction: 240
               alias: rod_2_3_gauge
             3:
-              correction: 140
+              correction: 215
               alias: rod_3_3_gauge
             4:
               correction: 230
@@ -44,7 +44,7 @@ rod_control_panel: # The board identifier
               correction: 180
               alias: rod_5_3_gauge
             7:
-              correction: 10
+              correction: 0
               alias: rod_0_3_gauge
         2:
             0:

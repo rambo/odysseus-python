@@ -23,7 +23,7 @@ FRAMEWORK_UPDATE_FPS = 15  # How often to call updates
 LOCAL_UPDATE_FPS = 25  # How often the local logic loop does stuff
 FORCE_UPDATE_INTERVAL = 10.0  # How often to force-update all states to HW
 GAUGE_TICK_SPEED = (1.0 / LOCAL_UPDATE_FPS) / 10  # 10 seconds to run gauge from (normalized) end to end
-GAUGE_MAX_HW_VALUE = 170
+GAUGE_MAX_HW_VALUE = 180
 
 
 def log_exceptions(func, re_raise=True):
