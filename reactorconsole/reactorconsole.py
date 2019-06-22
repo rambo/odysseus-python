@@ -59,6 +59,7 @@ class ReactorState:  # pylint: disable=R0902
     backend_state = None
     event_state_lock = threading.Lock()
     backend_state_lock = threading.Lock()
+    global_led_dimming_factor = 1.0
 
     def __init__(self, serialpath='/dev/ttyUSB0', devicesyml_path='./ardubus_devices.yml', loglevel=logging.INFO):
         self.serialpath = serialpath
@@ -190,17 +191,18 @@ class ReactorState:  # pylint: disable=R0902
     @log_exceptions
     def _update_colorled_value(self, ledidx):
         """Maps the normalized led value to the hw value and returns a coroutine that sends it"""
-        send_value = round(self.colorled_values[ledidx] * 255)
-        self.logger.debug('#{} send_value={} (normalized was {:0.3f})'.format(ledidx, send_value,
-                                                                         self.colorled_values[ledidx]))
+        dimmed = self.colorled_values[ledidx] * self.global_led_dimming_factor
+        send_value = round(dimmed * 255)
+        self.logger.debug('#{} send_value={} (normalized was {:0.3f})'.format(ledidx, send_value, dimmed))
         # These have no aliases, we know that the colorleds are on board 1
         return self.ardubus['pca9635RGBJBOL_maps'][1][ledidx]['PROXY'].set_value(send_value)
 
     @log_exceptions
     def _update_topled_value(self, alias):
         """Maps the normalized led value to the hw value and returns a coroutine that sends it"""
-        send_value = round(self.topled_values[alias] * 255)
-        self.logger.debug('{} send_value={} (normalized was {:0.3f})'.format(alias, send_value, self.topled_values[alias]))
+        dimmed = self.topled_values[alias] * self.global_led_dimming_factor
+        send_value = round(dimmed * 255)
+        self.logger.debug('{} send_value={} (normalized was {:0.3f})'.format(alias, send_value, dimmed))
         # NOTE! This is a coroutine
         return self.aliases[alias]['PROXY'].set_value(send_value)
 
@@ -208,7 +210,8 @@ class ReactorState:  # pylint: disable=R0902
     def _update_gauge_value(self, alias):
         """Maps the normalized gauge value to the hw value and returns a coroutine that sends it"""
         send_value = round(self.gauge_values[alias] * GAUGE_MAX_HW_VALUE)
-        self.logger.debug('{} send_value={} (normalized was {:0.3f})'.format(alias, send_value, self.gauge_values[alias]))
+        self.logger.debug('{} send_value={} (normalized was {:0.3f})'.format(alias, send_value,
+                                                                             self.gauge_values[alias]))
         # NOTE! This is a coroutine
         return self.aliases[alias]['PROXY'].set_value(send_value)
 
