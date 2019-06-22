@@ -124,6 +124,7 @@ class ReactorState:  # pylint: disable=R0902
                 new_value = self.gauge_values[gauge_alias]
                 if self.gauge_directions[up_alias]:
                     if self.commit_arm_state >= CommitState.armed:
+                        # TODO: indicate this somehow in the HW too (also for down direction)
                         self.logger.info('Trying to move {} but we are in armed stated {}'.format(
                             gauge_alias, self.commit_arm_state))
                     else:
@@ -301,20 +302,15 @@ class ReactorState:  # pylint: disable=R0902
     async def _local_update_loop(self):
         """Coroutine that runs the main hw update loop"""
         await self._reset_console_values()
-        last_iteration = 0
         self.logger.debug('Starting loop')
         handled_arm_state = None
         self.arm_previous_top_text = ''
+        interval = (1.0 / LOCAL_UPDATE_FPS)
         while self.keep_running:
-            now = time.time()
-            # wait for next iteration while yielding CPU & GIL
-            if (now - last_iteration) < (1.0 / LOCAL_UPDATE_FPS):
-                await asyncio.sleep(0)
-                continue
-            last_iteration = now
-
             # Keep track of what we need to do
+            now = time.time()
             run_coros = []
+
             # Check if we are going to do full update anyway
             self.full_update_pending = False
             if (now - self.last_full_update) > FORCE_UPDATE_INTERVAL:
@@ -348,6 +344,11 @@ class ReactorState:  # pylint: disable=R0902
                 asyncio.create_task(self._do_full_update())
             elif run_coros:
                 asyncio.create_task(self._handle_commands(run_coros))
+
+            # sleep until it's time to do things again
+            spent_time = time.time() - now
+            if spent_time < interval:
+                await asyncio.sleep(interval - spent_time)
 
     @log_exceptions
     def _start_local_update_loop(self):
