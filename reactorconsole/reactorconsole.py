@@ -21,8 +21,8 @@ from odysseus.taskbox import TaskBoxRunner  # isort:skip ; # pylint: disable=C04
 
 FRAMEWORK_UPDATE_FPS = 15  # How often to call updates
 LOCAL_UPDATE_FPS = 25  # How often the local logic loop does stuff
-FORCE_UPDATE_INTERVAL = 5.0  # How often to force-update all states to HW
-GAUGE_TICK_SPEED = 1.0 / LOCAL_UPDATE_FPS / 10  # 10 seconds to run gauge from (normalized) end to end
+FORCE_UPDATE_INTERVAL = 10.0  # How often to force-update all states to HW
+GAUGE_TICK_SPEED = (1.0 / LOCAL_UPDATE_FPS) / 10  # 10 seconds to run gauge from (normalized) end to end
 GAUGE_MAX_HW_VALUE = 170
 
 
@@ -88,14 +88,17 @@ class ReactorState:  # pylint: disable=R0902
         self.logger.debug('Called')
         # Init serial transport
         self._init_ardubus_transport()
+        self.logger.debug('Wait for arduino to finish initializing')
+        time.sleep(2.0)
         self._reset_console_values()
         last_iteration = 0
         self.logger.debug('Starting loop')
         while self.keep_running:
             now = time.time()
             # wait for next iteration while yielding CPU & GIL
-            if (now - last_iteration) < LOCAL_UPDATE_FPS:
+            if (now - last_iteration) < (1.0 / LOCAL_UPDATE_FPS):
                 time.sleep(0)
+                continue
             last_iteration = now
             # self.logger.debug('Iterating')
 
@@ -116,24 +119,25 @@ class ReactorState:  # pylint: disable=R0902
                     new_value = self.gauge_values[gauge_alias]
                     if self.gauge_directions[up_alias]:
                         self.logger.debug('Moving {} UP'.format(gauge_alias))
-                        new_value += GAUGE_TICK_SPEED
+                        new_value = self.gauge_values[gauge_alias] + GAUGE_TICK_SPEED
                     if self.gauge_directions[dn_alias]:
                         self.logger.debug('Moving {} DOWN'.format(gauge_alias))
-                        new_value -= GAUGE_TICK_SPEED
+                        new_value = self.gauge_values[gauge_alias] - GAUGE_TICK_SPEED
                     if self.gauge_directions[dn_alias] and self.gauge_directions[up_alias]:
                         self.logger.error('Aliases {} are both set, some swith is b0rked!'.format([up_alias, dn_alias]))
                         # It's a no-op, no need to check this alias further
                         continue
                     # Limit the values
                     if new_value < 0.0:
-                        self.logger.debug('{} limited to 0.0'.format(gauge_alias))
+                        self.logger.debug('{} limited to 0.0 (was {})'.format(gauge_alias, new_value))
                         new_value = 0.0
                     if new_value > 1.0:
-                        self.logger.debug('{} limited to 1.0'.format(gauge_alias))
+                        self.logger.debug('{} limited to 1.0 (was {})'.format(gauge_alias, new_value))
                         new_value = 1.0
-                    self.gauge_values[gauge_alias] = new_value
                     if not full_update_pending and new_value != self.gauge_values[gauge_alias]:
                         run_coros.append(self._update_gauge_value(gauge_alias))
+                    # The actual hw update is executed later so this is fine.
+                    self.gauge_values[gauge_alias] = new_value
 
             if full_update_pending:
                 self._do_full_update()
@@ -187,7 +191,7 @@ class ReactorState:  # pylint: disable=R0902
     def _update_colorled_value(self, ledidx):
         """Maps the normalized led value to the hw value and returns a coroutine that sends it"""
         send_value = round(self.colorled_values[ledidx] * 255)
-        self.logger.debug('#{} send_value={} (normalized was {})'.format(ledidx, send_value,
+        self.logger.debug('#{} send_value={} (normalized was {:0.3f})'.format(ledidx, send_value,
                                                                          self.colorled_values[ledidx]))
         # These have no aliases, we know that the colorleds are on board 1
         return self.ardubus['pca9635RGBJBOL_maps'][1][ledidx]['PROXY'].set_value(send_value)
@@ -196,7 +200,7 @@ class ReactorState:  # pylint: disable=R0902
     def _update_topled_value(self, alias):
         """Maps the normalized led value to the hw value and returns a coroutine that sends it"""
         send_value = round(self.topled_values[alias] * 255)
-        self.logger.debug('{} send_value={} (normalized was {})'.format(alias, send_value, self.topled_values[alias]))
+        self.logger.debug('{} send_value={} (normalized was {:0.3f})'.format(alias, send_value, self.topled_values[alias]))
         # NOTE! This is a coroutine
         return self.aliases[alias]['PROXY'].set_value(send_value)
 
@@ -204,7 +208,7 @@ class ReactorState:  # pylint: disable=R0902
     def _update_gauge_value(self, alias):
         """Maps the normalized gauge value to the hw value and returns a coroutine that sends it"""
         send_value = round(self.gauge_values[alias] * GAUGE_MAX_HW_VALUE)
-        self.logger.debug('{} send_value={} (normalized was {})'.format(alias, send_value, self.gauge_values[alias]))
+        self.logger.debug('{} send_value={} (normalized was {:0.3f})'.format(alias, send_value, self.gauge_values[alias]))
         # NOTE! This is a coroutine
         return self.aliases[alias]['PROXY'].set_value(send_value)
 
@@ -217,6 +221,7 @@ class ReactorState:  # pylint: disable=R0902
         # these all depend on same lock so maybe better to handle them sequentially
         for coro in run_coros:
             asyncio.get_event_loop().run_until_complete(coro)
+            time.sleep(0.002)  # Rate limit the spam since we don't wait for responses
         diff = round((time.time() - now) * 1000)
         self.logger.info('Commands done in {}ms'.format(diff))
 
