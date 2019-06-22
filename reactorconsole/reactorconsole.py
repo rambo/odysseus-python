@@ -28,6 +28,12 @@ GAUGE_TICK_SPEED = (1.0 / LOCAL_UPDATE_FPS) / 7.5  # 10 seconds to run gauge fro
 GAUGE_MAX_HW_VALUE = 180
 GAUGE_LEEWAY = GAUGE_TICK_SPEED * 4  # by how much the guage value can be off the backend expected
 ARMED_TOP_TEXT = '-----'
+RED_LEDS_IDX = (
+    4, 5, 6, 7,
+    12, 13, 14, 15,
+    20, 21, 22, 23,
+    28, 29, 30, 31,
+)
 
 
 def log_exceptions(func, re_raise=True):
@@ -101,7 +107,7 @@ class ReactorState:  # pylint: disable=R0902
 
         # Init local update thread
         self.logger.info('Starting local update thread')
-        self.local_update_thread = threading.Thread(target=self._local_update_loop)
+        self.local_update_thread = threading.Thread(target=self._start_local_update_loop)
         self.local_update_thread.start()
 
     @log_exceptions
@@ -193,16 +199,32 @@ class ReactorState:  # pylint: disable=R0902
         return run_coros
 
     @log_exceptions
-    def _invalid_commit_punish(self, run_coros, full_update_pending):
+    async def _invalid_commit_punish(self, full_update_pending):
         """Punishment for invalid commit"""
         self.logger.info('PUNISH!!!')
+        # Randomize gauge values
+        run_commands = []
         for alias in self.gauge_values:
             backend_key = alias.replace('_gauge', '').replace('rod_', '')
             if random.random() > 0.5 or backend_key in self.backend_state['expected']:
                 self.gauge_values[alias] = random.random()
                 if not full_update_pending:
-                    run_coros.append(self._update_gauge_value(alias))
-        return run_coros
+                    run_commands.append(self._update_gauge_value(alias))
+        asyncio.create_task(self._handle_commands(run_commands))
+        # Red LEDs pulse-effect
+        blinker_backup = self.use_random_blinkenlichten
+        fade_steps = 50
+        fade_time = 1.5
+        for step in range(fade_steps):
+            run_commands = []
+            fade_value = 1.0 - (1.0 / fade_steps) * step
+            for ledidx in RED_LEDS_IDX:
+                self.colorled_values[ledidx] = fade_value
+                run_commands.append(self._update_colorled_value(ledidx))
+            asyncio.create_task(self._handle_commands(run_commands))
+            await asyncio.sleep(fade_time / fade_steps)
+        # Restore previous blinker state
+        self.use_random_blinkenlichten = blinker_backup
 
     @log_exceptions
     def _local_update_loop_arm_commit(self, run_coros, full_update_pending):
@@ -219,7 +241,7 @@ class ReactorState:  # pylint: disable=R0902
                     run_coros.append(self._update_toptext())
             if self.commit_arm_state == CommitState.committed:
                 if not self.gauges_match_expected:
-                    run_coros = self._invalid_commit_punish(run_coros, full_update_pending)
+                    asyncio.create_task(self._invalid_commit_punish(full_update_pending))
                 else:
                     self.commit_arm_state = CommitState.send_commit
             if self.commit_arm_state == CommitState.commit_sent:
@@ -244,17 +266,9 @@ class ReactorState:  # pylint: disable=R0902
         return run_coros
 
     @log_exceptions
-    def _local_update_loop(self):
-        """Handle local interaction separate from the framework"""
-        self.logger.debug('Called')
-        # Initialize asyncio eventloop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        # Init serial transport
-        self._init_ardubus_transport()
-        self.logger.debug('Wait for arduino to finish initializing')
-        time.sleep(2.0)
-        self._reset_console_values()
+    async def _local_update_loop(self):
+        """Coroutine that runs the main hw update loop"""
+        await self._reset_console_values()
         last_iteration = 0
         self.logger.debug('Starting loop')
         handled_arm_state = None
@@ -263,7 +277,7 @@ class ReactorState:  # pylint: disable=R0902
             now = time.time()
             # wait for next iteration while yielding CPU & GIL
             if (now - last_iteration) < (1.0 / LOCAL_UPDATE_FPS):
-                time.sleep(0)
+                await asyncio.sleep(0)
                 continue
             last_iteration = now
 
@@ -294,12 +308,25 @@ class ReactorState:  # pylint: disable=R0902
                 handled_arm_state = self.commit_arm_state
                 run_coros = self._local_update_loop_arm_commit(run_coros, full_update_pending)
 
-            # TODO: implement missing logic, remember to add tasks to run_coros only if full_update_pending is False
-
             if full_update_pending:
-                self._do_full_update()
+                asyncio.create_task(self._do_full_update())
             elif run_coros:
-                self._handle_commands(run_coros)
+                asyncio.create_task(self._handle_commands(run_coros))
+
+    @log_exceptions
+    def _start_local_update_loop(self):
+        """Handle local interaction separate from the framework"""
+        self.logger.debug('Called')
+        # Initialize asyncio eventloop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        # Init serial transport
+        self._init_ardubus_transport()
+        self.logger.debug('Wait for arduino to finish initializing')
+        time.sleep(2.0)
+        # Add the local update as task and start the asyncioloop
+        asyncio.create_task(self._local_update_loop())
+        loop.run_forever()
 
     @log_exceptions
     def _init_ardubus_transport(self):
@@ -358,7 +385,7 @@ class ReactorState:  # pylint: disable=R0902
     def _update_colorled_value(self, ledidx):
         """Maps the normalized led value to the hw value and returns a coroutine that sends it"""
         dimmed = self.colorled_values[ledidx] * self.global_led_dimming_factor * self.colorled_global_dimming
-        if 4 < ledidx < 8 or 12 < ledidx < 16 or 20 < ledidx < 24 or 28 < ledidx:  # Red led indices
+        if ledidx in RED_LEDS_IDX:
             dimmed = dimmed * self.colorled_red_dimming
         send_value = round(dimmed * 255)
         self.logger.debug('#{} send_value={} (normalized was {:0.3f})'.format(ledidx, send_value, dimmed))
@@ -384,20 +411,22 @@ class ReactorState:  # pylint: disable=R0902
         return self.aliases[alias]['PROXY'].set_value(send_value)
 
     @log_exceptions
-    def _handle_commands(self, run_coros):
+    async def _handle_commands(self, run_coros):
         """Send and time ardubus commands"""
         now = time.time()
         self.logger.debug('About to process {} commands'.format(len(run_coros)))
-        # asyncio.get_event_loop().run_until_complete(asyncio.gather(*run_coros))
-        # these all depend on same lock so maybe better to handle them sequentially
+        # await asyncio.gather(*run_coros)
+        # these all depend on same lock so maybe better to handle them sequentially and rate-limit
+        rate_limit = len(run_coros) > 1
         for coro in run_coros:
-            asyncio.get_event_loop().run_until_complete(coro)
-            time.sleep(0.002)  # Rate limit the spam since we don't wait for responses
+            await coro
+            if rate_limit:
+                await asyncio.sleep(0.002)  # Rate limit the spam since we don't wait for responses
         diff = round((time.time() - now) * 1000)
         self.logger.debug('Commands done in {}ms'.format(diff))
 
     @log_exceptions
-    def _do_full_update(self):
+    async def _do_full_update(self):
         """Send all values to HW"""
         self.logger.debug('called')
         # Keep track of what we need to do
@@ -414,7 +443,7 @@ class ReactorState:  # pylint: disable=R0902
         # Top-text/number
         run_coros.append(self._update_toptext())
         # Run all the jobs
-        self._handle_commands(run_coros)
+        await self._handle_commands(run_coros)
         self.last_full_update = time.time()
 
     @log_exceptions
