@@ -74,11 +74,14 @@ class ReactorState:  # pylint: disable=R0902
     event_state_lock = threading.Lock()
     backend_state_lock = threading.Lock()
     global_led_dimming_factor = 1.0
+    colorled_global_dimming = 0.25
+    colorled_red_dimming = 0.10
     backend_state_changed_flag = False
     commit_arm_state = CommitState.unintialized
     toptext = ''
     gauges_match_expected = False
     arm_previous_top_text = ''
+    use_random_blinkenlichten = True
 
     def __init__(self, serialpath='/dev/ttyUSB0', devicesyml_path='./ardubus_devices.yml', loglevel=logging.INFO):
         self.serialpath = serialpath
@@ -227,6 +230,20 @@ class ReactorState:  # pylint: disable=R0902
         return run_coros
 
     @log_exceptions
+    def _local_update_loop_blinkenlighten(self, run_coros, full_update_pending):
+        """Blink the gauge LEDs randomly"""
+        for idx, current_val in enumerate(self.colorled_values):
+            if random.random() > 0.10:
+                continue
+            if current_val > 0:
+                self.colorled_values[idx] = 0.0
+            else:
+                self.colorled_values[idx] = random.choice((0.25, 0.5, 1.0))
+            if not full_update_pending:
+                run_coros.append(self._update_colorled_value(idx))
+        return run_coros
+
+    @log_exceptions
     def _local_update_loop(self):
         """Handle local interaction separate from the framework"""
         self.logger.debug('Called')
@@ -269,6 +286,8 @@ class ReactorState:  # pylint: disable=R0902
             # Other processing
             run_coros = self._local_update_loop_move_gauges(run_coros, full_update_pending)
             run_coros = self._local_update_loop_check_gauges(run_coros, full_update_pending)
+            if self.use_random_blinkenlichten:
+                run_coros = self._local_update_loop_blinkenlighten(run_coros, full_update_pending)
 
             # Arming and committing
             if handled_arm_state != self.commit_arm_state:
@@ -338,7 +357,9 @@ class ReactorState:  # pylint: disable=R0902
     @log_exceptions
     def _update_colorled_value(self, ledidx):
         """Maps the normalized led value to the hw value and returns a coroutine that sends it"""
-        dimmed = self.colorled_values[ledidx] * self.global_led_dimming_factor
+        dimmed = self.colorled_values[ledidx] * self.global_led_dimming_factor * self.colorled_global_dimming
+        if 4 < ledidx < 8 or 12 < ledidx < 16 or 20 < ledidx < 24 or 28 < ledidx:  # Red led indices
+            dimmed = dimmed * self.colorled_red_dimming
         send_value = round(dimmed * 255)
         self.logger.debug('#{} send_value={} (normalized was {:0.3f})'.format(ledidx, send_value, dimmed))
         # These have no aliases, we know that the colorleds are on board 1
