@@ -1,0 +1,2 @@
+-e git+https://github.com/rambo/arDuBUS#egg=ardubus&subdirectory=python3-ardubus
+-r ../requirements.txt
