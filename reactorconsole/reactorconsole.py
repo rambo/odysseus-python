@@ -223,9 +223,10 @@ class ReactorState:  # pylint: disable=R0902
                 if not self.full_update_pending:
                     run_commands.append(self._update_gauge_value(alias))
         if run_commands:
-            asyncio.create_task(self._handle_commands(run_commands))
+            asyncio.get_event_loop().create_task(self._handle_commands(run_commands))
         # Red LEDs pulse-effect
         blinker_backup = self.use_random_blinkenlichten
+        self.use_random_blinkenlichten = False
         fade_steps = 50
         fade_time = 1.5
         for step in range(fade_steps):
@@ -236,7 +237,7 @@ class ReactorState:  # pylint: disable=R0902
                 if not self.full_update_pending:
                     run_commands.append(self._update_colorled_value(ledidx))
             if run_commands:
-                asyncio.create_task(self._handle_commands(run_commands))
+                asyncio.get_event_loop().create_task(self._handle_commands(run_commands))
             await asyncio.sleep(fade_time / fade_steps)
         # Restore previous blinker state
         self.use_random_blinkenlichten = blinker_backup
@@ -256,7 +257,7 @@ class ReactorState:  # pylint: disable=R0902
                     run_coros.append(self._update_toptext())
             if self.commit_arm_state == CommitState.committed:
                 if not self.gauges_match_expected:
-                    asyncio.create_task(self._invalid_commit_punish())
+                    asyncio.get_event_loop().create_task(self._invalid_commit_punish())
                 else:
                     self.commit_arm_state = CommitState.send_commit
             if self.commit_arm_state == CommitState.commit_sent:
@@ -294,7 +295,7 @@ class ReactorState:  # pylint: disable=R0902
                 if not self.full_update_pending:
                     run_commands.append(self._update_colorled_value(ledidx))
             if run_commands:
-                asyncio.create_task(self._handle_commands(run_commands))
+                asyncio.get_event_loop().create_task(self._handle_commands(run_commands))
             await asyncio.sleep(fade_time / fade_steps)
         # Set all LEDS off and restore global dimming
         run_commands = []
@@ -303,7 +304,7 @@ class ReactorState:  # pylint: disable=R0902
             if not self.full_update_pending:
                 run_commands.append(self._update_colorled_value(ledidx))
         if run_commands:
-            asyncio.create_task(self._handle_commands(run_commands))
+            asyncio.get_event_loop().create_task(self._handle_commands(run_commands))
         self.colorled_global_dimming = dim_backup
 
     @log_exceptions
@@ -320,7 +321,6 @@ class ReactorState:  # pylint: disable=R0902
             run_coros = []
 
             # Check if we are going to do full update anyway
-            self.full_update_pending = False
             if (now - self.last_full_update) > FORCE_UPDATE_INTERVAL:
                 self.full_update_pending = True
 
@@ -335,7 +335,7 @@ class ReactorState:  # pylint: disable=R0902
                 # Stop random blink when we're broken (fixed state resets this in the framework update method)
                 if self.backend_state.get('status', 'undef') == 'broken':
                     self.use_random_blinkenlichten = False
-                    asyncio.create_task(self._enter_broken_effect())
+                    asyncio.get_event_loop().create_task(self._enter_broken_effect())
 
             # Other processing
             run_coros = self._local_update_loop_move_gauges(run_coros)
@@ -349,9 +349,9 @@ class ReactorState:  # pylint: disable=R0902
                 run_coros = self._local_update_loop_arm_commit(run_coros)
 
             if self.full_update_pending:
-                asyncio.create_task(self._do_full_update())
+                asyncio.get_event_loop().create_task(self._do_full_update())
             elif run_coros:
-                asyncio.create_task(self._handle_commands(run_coros))
+                asyncio.get_event_loop().create_task(self._handle_commands(run_coros))
 
             # sleep until it's time to do things again
             spent_time = time.time() - now
@@ -370,7 +370,7 @@ class ReactorState:  # pylint: disable=R0902
         self.logger.debug('Wait for arduino to finish initializing')
         time.sleep(2.0)
         # Add the local update as task and start the asyncioloop
-        asyncio.create_task(self._local_update_loop())
+        asyncio.get_event_loop().create_task(self._local_update_loop())
         loop.run_forever()
 
     @log_exceptions
@@ -389,7 +389,7 @@ class ReactorState:  # pylint: disable=R0902
         self.ardubus_transport.command_wait_response = False
 
     @log_exceptions
-    def _reset_console_values(self):
+    async def _reset_console_values(self):
         """Reset all console values to default"""
         self.logger.debug('called')
         self.toptext = ''
@@ -415,7 +415,7 @@ class ReactorState:  # pylint: disable=R0902
         self.logger.debug('gauge_directions: {}'.format(repr(self.gauge_directions)))
         self.logger.debug('colorled_values: {}'.format(repr(self.colorled_values)))
 
-        self._do_full_update()
+        await self._do_full_update()
 
     @log_exceptions
     def _update_toptext(self):
@@ -474,6 +474,7 @@ class ReactorState:  # pylint: disable=R0902
     async def _do_full_update(self):
         """Send all values to HW"""
         self.logger.debug('called')
+        self.full_update_pending = False
         # Keep track of what we need to do
         run_coros = []
         # Add all aliased values to the queue
