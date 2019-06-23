@@ -308,6 +308,27 @@ class ReactorState:  # pylint: disable=R0902
         self.colorled_global_dimming = dim_backup
 
     @log_exceptions
+    def _local_update_loop_reset_topleds(self, run_coros):
+        """Reset the topleds (called on backend state change"""
+        for alias in self.topled_values:
+            self.topled_values[alias] = 0.0
+            if not self.full_update_pending:
+                run_coros.append(self._update_topled_value(alias))
+        return run_coros
+
+    @log_exceptions
+    def _local_update_loop_backend_toptext(self, run_coros):
+        """Handle backend set toptext"""
+        new_toptext = self.backend_state.get('toptext', None)
+        if new_toptext is not None:
+            self.arm_previous_top_text = new_toptext
+            if self.toptext != ARMED_TOP_TEXT:
+                self.toptext = new_toptext
+                if not self.full_update_pending:
+                    run_coros.append(self._update_toptext())
+        return run_coros
+
+    @log_exceptions
     async def _local_update_loop(self):
         """Coroutine that runs the main hw update loop"""
         await self._reset_console_values()
@@ -327,15 +348,14 @@ class ReactorState:  # pylint: disable=R0902
             # Reset stuff that needs reset when backend state changes
             if self.backend_state_changed_flag:
                 self.backend_state_changed_flag = False
-                # Top-leds
-                for alias in self.topled_values:
-                    self.topled_values[alias] = 0.0
-                    if not self.full_update_pending:
-                        run_coros.append(self._update_topled_value(alias))
                 # Stop random blink when we're broken (fixed state resets this in the framework update method)
                 if self.backend_state.get('status', 'undef') == 'broken':
                     self.use_random_blinkenlichten = False
                     asyncio.get_event_loop().create_task(self._enter_broken_effect())
+                # Top-leds
+                run_coros = self._local_update_loop_reset_topleds(run_coros)
+                # top-text
+                run_coros = self._local_update_loop_backend_toptext(run_coros)
 
             # Other processing
             run_coros = self._local_update_loop_move_gauges(run_coros)
