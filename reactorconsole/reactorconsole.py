@@ -104,6 +104,7 @@ class ReactorState:  # pylint: disable=R0902
         self.topled_values = {}
         self.colorled_values = [0.0 for _ in range(32)]
         self.last_full_update = 0
+        self._arm_blink_active = False
 
         # init standard logging
         ardubus_core.init_logging(loglevel)
@@ -131,7 +132,7 @@ class ReactorState:  # pylint: disable=R0902
 
                 if self.gauge_directions[up_alias]:
                     if self.commit_arm_state >= CommitState.armed:
-                        # TODO: indicate this somehow in the HW too (also for down direction)
+                        asyncio.get_event_loop().create_task(self._blink_armed_text())
                         self.logger.info('Trying to move {} but we are in armed stated {}'.format(
                             gauge_alias, self.commit_arm_state))
                     else:
@@ -139,6 +140,7 @@ class ReactorState:  # pylint: disable=R0902
                         new_value = self.gauge_values[gauge_alias] + GAUGE_TICK_SPEED
                 elif self.gauge_directions[dn_alias]:
                     if self.commit_arm_state >= CommitState.armed:
+                        asyncio.get_event_loop().create_task(self._blink_armed_text())
                         self.logger.info('Trying to move {} but we are in armed stated {}'.format(
                             gauge_alias, self.commit_arm_state))
                     else:
@@ -329,6 +331,33 @@ class ReactorState:  # pylint: disable=R0902
         return run_coros
 
     @log_exceptions
+    async def _blink_armed_text(self):
+        """Blink the armed text a few times"""
+        # Guard against multiple blink tasks running at the same time
+        if self._arm_blink_active:
+            return
+        self._arm_blink_active = True
+        if self.toptext != ARMED_TOP_TEXT:
+            self.arm_previous_top_text = self.toptext
+        for idx in range(4):
+            if idx % 2 == 0:
+                self.toptext = ARMED_TOP_TEXT
+            else:
+                self.toptext = self.arm_previous_top_text
+            if not self.full_update_pending:
+                asyncio.get_event_loop().create_task(self._handle_commands([self._update_toptext()]))
+            await asyncio.sleep(0.25)
+
+        # Restore original value if needed
+        if self.commit_arm_state == CommitState.armed and self.toptext != ARMED_TOP_TEXT:
+            self.toptext = ARMED_TOP_TEXT
+        elif self.toptext != self.arm_previous_top_text:
+                self.toptext = self.arm_previous_top_text
+        if not self.full_update_pending:
+            asyncio.get_event_loop().create_task(self._handle_commands([self._update_toptext()]))
+        self._arm_blink_active = False
+
+    @log_exceptions
     async def _local_update_loop(self):
         """Coroutine that runs the main hw update loop"""
         await self._reset_console_values()
@@ -486,7 +515,7 @@ class ReactorState:  # pylint: disable=R0902
         for coro in run_coros:
             await coro
             if rate_limit:
-                await asyncio.sleep(0.002)  # Rate limit the spam since we don't wait for responses
+                await asyncio.sleep(0.001)  # Rate limit the spam since we don't wait for responses
         diff = round((time.time() - now) * 1000)
         self.logger.debug('Commands done in {}ms'.format(diff))
 
