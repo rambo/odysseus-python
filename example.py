@@ -5,6 +5,8 @@ import random
 
 # Usage:  python3 example.py --id myid --mock-server
 
+# Simulating backend value change:  echo '{"number":5}' > backend-mock-myid.json
+
 def logic(state, backend_change):
     if backend_change:
         print(state)
