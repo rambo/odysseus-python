@@ -29,6 +29,7 @@ SWITCH_GPIO_PIN=4
 
 default_state = {
     "value": 330.5,         # current "real" value
+    "displayValue": 330.5   # displayed value
     "rndMagnitude": 0,      # current magnitude of white noise
     "brownNoiseValue": 0,   # current brown noise value
     "drift": 3,             # value drift per MINUTE
@@ -85,6 +86,7 @@ def logic(state, backend_change):
     #rnd = random.uniform(-state["rndMagnitude"], state["rndMagnitude"])
     rnd = random.gauss(0, state["rndMagnitude"])
     value = state["value"] + state["brownNoiseValue"] + rnd + sine
+    state["displayValue"] = value
 
     # display  actual  brown  sine  white-mag
     #print("{:.1f}\t{:.2f}\t{:+.2f}\t{:+.2f}\t{:.2f}".format(value, state["value"], state["brownNoiseValue"], sine, state["rndMagnitude"]))
