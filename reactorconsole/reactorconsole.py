@@ -259,6 +259,15 @@ class ReactorState:  # pylint: disable=R0902
                 asyncio.get_event_loop().create_task(self._handle_commands(run_commands))
             await asyncio.sleep(fade_time / fade_steps)
 
+        # Turn them all off (the dim does not turn them fully off)
+        run_commands = []
+        for ledidx in RED_LEDS_IDX:
+            self.colorled_values[ledidx] = 0.0
+            if not self.full_update_pending:
+                run_commands.append(self._update_colorled_value(ledidx))
+        if run_commands:
+            asyncio.get_event_loop().create_task(self._handle_commands(run_commands))
+
         # Keep them off for a moment
         await asyncio.sleep(1.5)
 
@@ -308,8 +317,8 @@ class ReactorState:  # pylint: disable=R0902
     @log_exceptions
     async def _enter_broken_effect(self):
         """Fade out the gauge LEDs when we enter broken state"""
-        fade_steps = 50
-        fade_time = 1.0
+        fade_steps = 35
+        fade_time = 2.5
         dim_backup = self.colorled_global_dimming
         for step in range(fade_steps):
             run_commands = []
@@ -321,7 +330,9 @@ class ReactorState:  # pylint: disable=R0902
             if run_commands:
                 asyncio.get_event_loop().create_task(self._handle_commands(run_commands))
             await asyncio.sleep(fade_time / fade_steps)
+
         # Set all LEDS off and restore global dimming
+        self.colorled_global_dimming = dim_backup
         run_commands = []
         for ledidx, _ in enumerate(self.colorled_values):
             self.colorled_values[ledidx] = 0.0
@@ -329,7 +340,6 @@ class ReactorState:  # pylint: disable=R0902
                 run_commands.append(self._update_colorled_value(ledidx))
         if run_commands:
             asyncio.get_event_loop().create_task(self._handle_commands(run_commands))
-        self.colorled_global_dimming = dim_backup
 
     @log_exceptions
     def _local_update_loop_reset_topleds(self, run_coros):
