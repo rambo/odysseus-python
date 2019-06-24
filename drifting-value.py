@@ -29,7 +29,7 @@ SWITCH_GPIO_PIN=4
 
 default_state = {
     "value": 330.5,         # current "real" value
-    "displayValue": 330.5   # displayed value
+    "displayValue": 330.5,  # displayed value
     "rndMagnitude": 0,      # current magnitude of white noise
     "brownNoiseValue": 0,   # current brown noise value
     "drift": 3,             # value drift per MINUTE
