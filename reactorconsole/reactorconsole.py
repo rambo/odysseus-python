@@ -193,6 +193,7 @@ class ReactorState:  # pylint: disable=R0902
             return run_coros
 
         # Set defined topleds to values according to expectation
+        set_leds = []
         with self.backend_state_lock:
             # self.logger.debug('"expected" backend state: {}'.format(repr(self.backend_state['expected'])))
             # self.logger.debug('"lights" backend state: {}'.format(repr(self.backend_state['lights'])))
@@ -203,6 +204,7 @@ class ReactorState:  # pylint: disable=R0902
                 exp_value = self.backend_state['expected'][position]
                 led_value = float(self.backend_state['lights'][position])
                 led_alias = 'rod_{}_led'.format(position)
+                set_leds.append(led_alias)
                 if self._gauge_within_expected(position, exp_value):
                     self.topled_values[led_alias] = led_value
                 else:
@@ -210,11 +212,20 @@ class ReactorState:  # pylint: disable=R0902
                     self.gauges_match_expected = False
                 if not self.full_update_pending:
                     run_coros.append(self._update_topled_value(led_alias))
+
+        # Make sure all other LEDs are off.
+        for led_alias in self.topled_values:
+            if led_alias not in set_leds:
+                self.topled_values[led_alias] = 0.0
+                if not self.full_update_pending:
+                    run_coros.append(self._update_topled_value(led_alias))
+
         return run_coros
 
     @log_exceptions
-    async def _invalid_commit_punish(self):
+    async def _invalid_commit_punish(self):  # pylint: disable=R0912
         """Punishment for invalid commit"""
+        global RED_LEDS_DIM
         self.logger.info('PUNISH!!!')
         # Randomize gauge values
         run_commands = []
@@ -224,12 +235,25 @@ class ReactorState:  # pylint: disable=R0902
                 self.gauge_values[alias] = random.random()
                 if not self.full_update_pending:
                     run_commands.append(self._update_gauge_value(alias))
-        if run_commands:
-            asyncio.get_event_loop().create_task(self._handle_commands(run_commands))
         # Red LEDs pulse-effect
         blinker_backup = self.use_random_blinkenlichten
+        red_fade_backup = RED_LEDS_DIM
+        RED_LEDS_DIM = 1.0
         self.use_random_blinkenlichten = False
-        fade_steps = 50
+        # Turn reds on, greens off
+        for idx, _ in enumerate(self.colorled_values):
+            if idx in RED_LEDS_IDX:
+                self.colorled_values[idx] = 1.0
+            else:
+                self.colorled_values[idx] = 0.0
+            if not self.full_update_pending:
+                run_commands.append(self._update_colorled_value(idx))
+        if run_commands:
+            asyncio.get_event_loop().create_task(self._handle_commands(run_commands))
+        await asyncio.sleep(0.5)
+
+        # Then fade reds out
+        fade_steps = 25
         fade_time = 1.5
         for step in range(fade_steps):
             run_commands = []
@@ -241,8 +265,13 @@ class ReactorState:  # pylint: disable=R0902
             if run_commands:
                 asyncio.get_event_loop().create_task(self._handle_commands(run_commands))
             await asyncio.sleep(fade_time / fade_steps)
-        # Restore previous blinker state
+
+        # Keep them off for a moment
+        await asyncio.sleep(1.5)
+
+        # Restore previous blinker and dim state
         self.use_random_blinkenlichten = blinker_backup
+        RED_LEDS_DIM = red_fade_backup
 
     @log_exceptions
     def _local_update_loop_arm_commit(self, run_coros):
@@ -352,7 +381,7 @@ class ReactorState:  # pylint: disable=R0902
         if self.commit_arm_state == CommitState.armed and self.toptext != ARMED_TOP_TEXT:
             self.toptext = ARMED_TOP_TEXT
         elif self.toptext != self.arm_previous_top_text:
-                self.toptext = self.arm_previous_top_text
+            self.toptext = self.arm_previous_top_text
         if not self.full_update_pending:
             asyncio.get_event_loop().create_task(self._handle_commands([self._update_toptext()]))
         self._arm_blink_active = False
