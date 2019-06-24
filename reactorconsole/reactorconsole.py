@@ -24,10 +24,20 @@ from odysseus.taskbox import TaskBoxRunner  # isort:skip ; # pylint: disable=C04
 FRAMEWORK_UPDATE_FPS = 15  # How often to call updates
 LOCAL_UPDATE_FPS = 25  # How often the local logic loop does stuff
 FORCE_UPDATE_INTERVAL = 10.0  # How often to force-update all states to HW
-GAUGE_TICK_SPEED = (1.0 / LOCAL_UPDATE_FPS) / 7.5  # 10 seconds to run gauge from (normalized) end to end
+GAUGE_TICK_SPEED = (1.0 / LOCAL_UPDATE_FPS) / 7.5  # 7.5 seconds to run gauge from (normalized) end to end
 GAUGE_MAX_HW_VALUE = 180
 GAUGE_LEEWAY = GAUGE_TICK_SPEED * 4  # by how much the guage value can be off the backend expected
 ARMED_TOP_TEXT = '-----'
+RED_LEDS_IDX = (
+    4, 5, 6, 7,
+    12, 13, 14, 15,
+    20, 21, 22, 23,
+    28, 29, 30, 31,
+)
+RED_LEDS_DIM = 0.1
+COLORLED_DEFAULT_GLOBAL_DIM = 0.25
+BLINKENLICHTEN_DEFAULT = True
+JUMPING_GAUGE_DRIFT_SPEED = (1.0 / LOCAL_UPDATE_FPS) / 90  # 1.5 minutes to drift from full to down
 
 
 def log_exceptions(func, re_raise=True):
@@ -74,14 +84,14 @@ class ReactorState:  # pylint: disable=R0902
     event_state_lock = threading.Lock()
     backend_state_lock = threading.Lock()
     global_led_dimming_factor = 1.0
-    colorled_global_dimming = 0.25
-    colorled_red_dimming = 0.10
+    colorled_global_dimming = COLORLED_DEFAULT_GLOBAL_DIM
     backend_state_changed_flag = False
     commit_arm_state = CommitState.unintialized
     toptext = ''
     gauges_match_expected = False
     arm_previous_top_text = ''
-    use_random_blinkenlichten = True
+    use_random_blinkenlichten = BLINKENLICHTEN_DEFAULT
+    full_update_pending = False
 
     def __init__(self, serialpath='/dev/ttyUSB0', devicesyml_path='./ardubus_devices.yml', loglevel=logging.INFO):
         self.serialpath = serialpath
@@ -94,6 +104,7 @@ class ReactorState:  # pylint: disable=R0902
         self.topled_values = {}
         self.colorled_values = [0.0 for _ in range(32)]
         self.last_full_update = 0
+        self._arm_blink_active = False
 
         # init standard logging
         ardubus_core.init_logging(loglevel)
@@ -101,11 +112,11 @@ class ReactorState:  # pylint: disable=R0902
 
         # Init local update thread
         self.logger.info('Starting local update thread')
-        self.local_update_thread = threading.Thread(target=self._local_update_loop)
+        self.local_update_thread = threading.Thread(target=self._start_local_update_loop)
         self.local_update_thread.start()
 
     @log_exceptions
-    def _local_update_loop_move_gauges(self, run_coros, full_update_pending):
+    def _local_update_loop_move_gauges(self, run_coros):
         """Handle the gauge update part"""
         with self.event_state_lock:
             # Move gauges
@@ -113,24 +124,32 @@ class ReactorState:  # pylint: disable=R0902
                 up_alias = gauge_alias.replace('_gauge', '_up')
                 dn_alias = gauge_alias.replace('_gauge', '_down')
                 new_value = self.gauge_values[gauge_alias]
+
+                if self.gauge_directions[dn_alias] and self.gauge_directions[up_alias]:
+                    self.logger.error('Aliases {} are both set, some swith is b0rked!'.format([up_alias, dn_alias]))
+                    # It's a no-op, no need to check this alias further
+                    continue
+
                 if self.gauge_directions[up_alias]:
                     if self.commit_arm_state >= CommitState.armed:
+                        asyncio.get_event_loop().create_task(self._blink_armed_text())
                         self.logger.info('Trying to move {} but we are in armed stated {}'.format(
                             gauge_alias, self.commit_arm_state))
                     else:
                         self.logger.debug('Moving {} UP'.format(gauge_alias))
                         new_value = self.gauge_values[gauge_alias] + GAUGE_TICK_SPEED
-                if self.gauge_directions[dn_alias]:
+                elif self.gauge_directions[dn_alias]:
                     if self.commit_arm_state >= CommitState.armed:
+                        asyncio.get_event_loop().create_task(self._blink_armed_text())
                         self.logger.info('Trying to move {} but we are in armed stated {}'.format(
                             gauge_alias, self.commit_arm_state))
                     else:
                         self.logger.debug('Moving {} DOWN'.format(gauge_alias))
                         new_value = self.gauge_values[gauge_alias] - GAUGE_TICK_SPEED
-                if self.gauge_directions[dn_alias] and self.gauge_directions[up_alias]:
-                    self.logger.error('Aliases {} are both set, some swith is b0rked!'.format([up_alias, dn_alias]))
-                    # It's a no-op, no need to check this alias further
-                    continue
+                elif self.backend_state.get('jumping', False):
+                    # If not actively controlled and jumping, slowly drift gauges down
+                    new_value = self.gauge_values[gauge_alias] - JUMPING_GAUGE_DRIFT_SPEED
+
                 # Limit the values
                 if new_value < 0.0:
                     self.logger.debug('{} limited to 0.0 (was {})'.format(gauge_alias, new_value))
@@ -138,7 +157,8 @@ class ReactorState:  # pylint: disable=R0902
                 if new_value > 1.0:
                     self.logger.debug('{} limited to 1.0 (was {})'.format(gauge_alias, new_value))
                     new_value = 1.0
-                if not full_update_pending and new_value != self.gauge_values[gauge_alias]:
+                # Schedule immediate update if needed
+                if not self.full_update_pending and new_value != self.gauge_values[gauge_alias]:
                     run_coros.append(self._update_gauge_value(gauge_alias))
                 # The actual hw update is executed later so this is fine.
                 self.gauge_values[gauge_alias] = new_value
@@ -162,7 +182,7 @@ class ReactorState:  # pylint: disable=R0902
         return False
 
     @log_exceptions
-    def _local_update_loop_check_gauges(self, run_coros, full_update_pending):
+    def _local_update_loop_check_gauges(self, run_coros):
         """Check backend expected vs current value and set the topleds accordingly"""
         self.gauges_match_expected = True
         if not self.backend_state:
@@ -188,49 +208,100 @@ class ReactorState:  # pylint: disable=R0902
                 else:
                     self.topled_values[led_alias] = 1.0 - led_value
                     self.gauges_match_expected = False
-                if not full_update_pending:
+                if not self.full_update_pending:
                     run_coros.append(self._update_topled_value(led_alias))
+
+        # Make sure all other LEDs are off. (was a bad idea afterall)
+
         return run_coros
 
     @log_exceptions
-    def _invalid_commit_punish(self, run_coros, full_update_pending):
+    async def _invalid_commit_punish(self):  # pylint: disable=R0912
         """Punishment for invalid commit"""
+        global RED_LEDS_DIM  # pylint: disable=W0603
         self.logger.info('PUNISH!!!')
+        # Randomize gauge values
+        run_commands = []
         for alias in self.gauge_values:
             backend_key = alias.replace('_gauge', '').replace('rod_', '')
             if random.random() > 0.5 or backend_key in self.backend_state['expected']:
                 self.gauge_values[alias] = random.random()
-                if not full_update_pending:
-                    run_coros.append(self._update_gauge_value(alias))
-        return run_coros
+                if not self.full_update_pending:
+                    run_commands.append(self._update_gauge_value(alias))
+        # Red LEDs pulse-effect
+        blinker_backup = self.use_random_blinkenlichten
+        red_fade_backup = RED_LEDS_DIM
+        RED_LEDS_DIM = 1.0
+        self.use_random_blinkenlichten = False
+        # Turn reds on, greens off
+        for idx, _ in enumerate(self.colorled_values):
+            if idx in RED_LEDS_IDX:
+                self.colorled_values[idx] = 1.0
+            else:
+                self.colorled_values[idx] = 0.0
+            if not self.full_update_pending:
+                run_commands.append(self._update_colorled_value(idx))
+        if run_commands:
+            asyncio.get_event_loop().create_task(self._handle_commands(run_commands))
+        await asyncio.sleep(0.5)
+
+        # Then fade reds out
+        fade_steps = 25
+        fade_time = 1.5
+        for step in range(fade_steps):
+            run_commands = []
+            fade_value = 1.0 - (1.0 / fade_steps) * step
+            for ledidx in RED_LEDS_IDX:
+                self.colorled_values[ledidx] = fade_value
+                if not self.full_update_pending:
+                    run_commands.append(self._update_colorled_value(ledidx))
+            if run_commands:
+                asyncio.get_event_loop().create_task(self._handle_commands(run_commands))
+            await asyncio.sleep(fade_time / fade_steps)
+
+        # Turn them all off (the dim does not turn them fully off)
+        run_commands = []
+        for ledidx in RED_LEDS_IDX:
+            self.colorled_values[ledidx] = 0.0
+            if not self.full_update_pending:
+                run_commands.append(self._update_colorled_value(ledidx))
+        if run_commands:
+            asyncio.get_event_loop().create_task(self._handle_commands(run_commands))
+
+        # Keep them off for a moment
+        await asyncio.sleep(1.5)
+
+        # Restore previous blinker and dim state
+        self.use_random_blinkenlichten = blinker_backup
+        RED_LEDS_DIM = red_fade_backup
 
     @log_exceptions
-    def _local_update_loop_arm_commit(self, run_coros, full_update_pending):
+    def _local_update_loop_arm_commit(self, run_coros):
         """Handle arm and commit"""
         with self.event_state_lock:
             if self.commit_arm_state == CommitState.ready:
                 self.toptext = self.arm_previous_top_text
-                if not full_update_pending:
+                if not self.full_update_pending:
                     run_coros.append(self._update_toptext())
             if self.commit_arm_state == CommitState.armed:
                 self.arm_previous_top_text = self.toptext
                 self.toptext = ARMED_TOP_TEXT
-                if not full_update_pending:
+                if not self.full_update_pending:
                     run_coros.append(self._update_toptext())
             if self.commit_arm_state == CommitState.committed:
                 if not self.gauges_match_expected:
-                    run_coros = self._invalid_commit_punish(run_coros, full_update_pending)
+                    asyncio.get_event_loop().create_task(self._invalid_commit_punish())
                 else:
                     self.commit_arm_state = CommitState.send_commit
             if self.commit_arm_state == CommitState.commit_sent:
                 self.toptext = self.arm_previous_top_text
-                if not full_update_pending:
+                if not self.full_update_pending:
                     run_coros.append(self._update_toptext())
 
         return run_coros
 
     @log_exceptions
-    def _local_update_loop_blinkenlighten(self, run_coros, full_update_pending):
+    def _local_update_loop_blinkenlighten(self, run_coros):
         """Blink the gauge LEDs randomly"""
         for idx, current_val in enumerate(self.colorled_values):
             if random.random() > 0.10:
@@ -239,12 +310,137 @@ class ReactorState:  # pylint: disable=R0902
                 self.colorled_values[idx] = 0.0
             else:
                 self.colorled_values[idx] = random.choice((0.25, 0.5, 1.0))
-            if not full_update_pending:
+            if not self.full_update_pending:
                 run_coros.append(self._update_colorled_value(idx))
         return run_coros
 
     @log_exceptions
-    def _local_update_loop(self):
+    async def _enter_broken_effect(self):
+        """Fade out the gauge LEDs when we enter broken state"""
+        fade_steps = 35
+        fade_time = 2.5
+        dim_backup = self.colorled_global_dimming
+        for step in range(fade_steps):
+            run_commands = []
+            fade_value = dim_backup - (dim_backup / fade_steps) * step
+            self.colorled_global_dimming = fade_value
+            for ledidx, _ in enumerate(self.colorled_values):
+                if not self.full_update_pending:
+                    run_commands.append(self._update_colorled_value(ledidx))
+            if run_commands:
+                asyncio.get_event_loop().create_task(self._handle_commands(run_commands))
+            await asyncio.sleep(fade_time / fade_steps)
+
+        # Set all LEDS off and restore global dimming
+        self.colorled_global_dimming = dim_backup
+        run_commands = []
+        for ledidx, _ in enumerate(self.colorled_values):
+            self.colorled_values[ledidx] = 0.0
+            if not self.full_update_pending:
+                run_commands.append(self._update_colorled_value(ledidx))
+        if run_commands:
+            asyncio.get_event_loop().create_task(self._handle_commands(run_commands))
+
+    @log_exceptions
+    def _local_update_loop_reset_topleds(self, run_coros):
+        """Reset the topleds (called on backend state change"""
+        for alias in self.topled_values:
+            self.topled_values[alias] = 0.0
+            if not self.full_update_pending:
+                run_coros.append(self._update_topled_value(alias))
+        return run_coros
+
+    @log_exceptions
+    def _local_update_loop_backend_toptext(self, run_coros):
+        """Handle backend set toptext"""
+        new_toptext = self.backend_state.get('toptext', None)
+        if new_toptext is not None:
+            self.arm_previous_top_text = new_toptext
+            if self.toptext != ARMED_TOP_TEXT:
+                self.toptext = new_toptext
+                if not self.full_update_pending:
+                    run_coros.append(self._update_toptext())
+        return run_coros
+
+    @log_exceptions
+    async def _blink_armed_text(self):
+        """Blink the armed text a few times"""
+        # Guard against multiple blink tasks running at the same time
+        if self._arm_blink_active:
+            return
+        self._arm_blink_active = True
+        if self.toptext != ARMED_TOP_TEXT:
+            self.arm_previous_top_text = self.toptext
+        for idx in range(4):
+            if idx % 2 == 0:
+                self.toptext = ARMED_TOP_TEXT
+            else:
+                self.toptext = self.arm_previous_top_text
+            if not self.full_update_pending:
+                asyncio.get_event_loop().create_task(self._handle_commands([self._update_toptext()]))
+            await asyncio.sleep(0.25)
+
+        # Restore original value if needed
+        if self.commit_arm_state == CommitState.armed and self.toptext != ARMED_TOP_TEXT:
+            self.toptext = ARMED_TOP_TEXT
+        elif self.toptext != self.arm_previous_top_text:
+            self.toptext = self.arm_previous_top_text
+        if not self.full_update_pending:
+            asyncio.get_event_loop().create_task(self._handle_commands([self._update_toptext()]))
+        self._arm_blink_active = False
+
+    @log_exceptions
+    async def _local_update_loop(self):
+        """Coroutine that runs the main hw update loop"""
+        await self._reset_console_values()
+        self.logger.debug('Starting loop')
+        handled_arm_state = None
+        self.arm_previous_top_text = ''
+        interval = (1.0 / LOCAL_UPDATE_FPS)
+        while self.keep_running:
+            # Keep track of what we need to do
+            now = time.time()
+            run_coros = []
+
+            # Check if we are going to do full update anyway
+            if (now - self.last_full_update) > FORCE_UPDATE_INTERVAL:
+                self.full_update_pending = True
+
+            # Reset stuff that needs reset when backend state changes
+            if self.backend_state_changed_flag:
+                self.backend_state_changed_flag = False
+                # Stop random blink when we're broken (fixed state resets this in the framework update method)
+                if self.backend_state.get('status', 'undef') == 'broken':
+                    self.use_random_blinkenlichten = False
+                    asyncio.get_event_loop().create_task(self._enter_broken_effect())
+                # Top-leds
+                run_coros = self._local_update_loop_reset_topleds(run_coros)
+                # top-text
+                run_coros = self._local_update_loop_backend_toptext(run_coros)
+
+            # Other processing
+            run_coros = self._local_update_loop_move_gauges(run_coros)
+            run_coros = self._local_update_loop_check_gauges(run_coros)
+            if self.use_random_blinkenlichten:
+                run_coros = self._local_update_loop_blinkenlighten(run_coros)
+
+            # Arming and committing
+            if handled_arm_state != self.commit_arm_state:
+                handled_arm_state = self.commit_arm_state
+                run_coros = self._local_update_loop_arm_commit(run_coros)
+
+            if self.full_update_pending:
+                asyncio.get_event_loop().create_task(self._do_full_update())
+            elif run_coros:
+                asyncio.get_event_loop().create_task(self._handle_commands(run_coros))
+
+            # sleep until it's time to do things again
+            spent_time = time.time() - now
+            if spent_time < interval:
+                await asyncio.sleep(interval - spent_time)
+
+    @log_exceptions
+    def _start_local_update_loop(self):
         """Handle local interaction separate from the framework"""
         self.logger.debug('Called')
         # Initialize asyncio eventloop for this thread
@@ -254,52 +450,9 @@ class ReactorState:  # pylint: disable=R0902
         self._init_ardubus_transport()
         self.logger.debug('Wait for arduino to finish initializing')
         time.sleep(2.0)
-        self._reset_console_values()
-        last_iteration = 0
-        self.logger.debug('Starting loop')
-        handled_arm_state = None
-        self.arm_previous_top_text = ''
-        while self.keep_running:
-            now = time.time()
-            # wait for next iteration while yielding CPU & GIL
-            if (now - last_iteration) < (1.0 / LOCAL_UPDATE_FPS):
-                time.sleep(0)
-                continue
-            last_iteration = now
-
-            # Keep track of what we need to do
-            run_coros = []
-            # Check if we are going to do full update anyway
-            full_update_pending = False
-            if (now - self.last_full_update) > FORCE_UPDATE_INTERVAL:
-                full_update_pending = True
-
-            # Reset stuff that needs reset when backend state changes
-            if self.backend_state_changed_flag:
-                self.backend_state_changed_flag = False
-                # Top-leds
-                for alias in self.topled_values:
-                    self.topled_values[alias] = 0.0
-                    if not full_update_pending:
-                        run_coros.append(self._update_topled_value(alias))
-
-            # Other processing
-            run_coros = self._local_update_loop_move_gauges(run_coros, full_update_pending)
-            run_coros = self._local_update_loop_check_gauges(run_coros, full_update_pending)
-            if self.use_random_blinkenlichten:
-                run_coros = self._local_update_loop_blinkenlighten(run_coros, full_update_pending)
-
-            # Arming and committing
-            if handled_arm_state != self.commit_arm_state:
-                handled_arm_state = self.commit_arm_state
-                run_coros = self._local_update_loop_arm_commit(run_coros, full_update_pending)
-
-            # TODO: implement missing logic, remember to add tasks to run_coros only if full_update_pending is False
-
-            if full_update_pending:
-                self._do_full_update()
-            elif run_coros:
-                self._handle_commands(run_coros)
+        # Add the local update as task and start the asyncioloop
+        asyncio.get_event_loop().create_task(self._local_update_loop())
+        loop.run_forever()
 
     @log_exceptions
     def _init_ardubus_transport(self):
@@ -317,7 +470,7 @@ class ReactorState:  # pylint: disable=R0902
         self.ardubus_transport.command_wait_response = False
 
     @log_exceptions
-    def _reset_console_values(self):
+    async def _reset_console_values(self):
         """Reset all console values to default"""
         self.logger.debug('called')
         self.toptext = ''
@@ -343,7 +496,7 @@ class ReactorState:  # pylint: disable=R0902
         self.logger.debug('gauge_directions: {}'.format(repr(self.gauge_directions)))
         self.logger.debug('colorled_values: {}'.format(repr(self.colorled_values)))
 
-        self._do_full_update()
+        await self._do_full_update()
 
     @log_exceptions
     def _update_toptext(self):
@@ -358,8 +511,8 @@ class ReactorState:  # pylint: disable=R0902
     def _update_colorled_value(self, ledidx):
         """Maps the normalized led value to the hw value and returns a coroutine that sends it"""
         dimmed = self.colorled_values[ledidx] * self.global_led_dimming_factor * self.colorled_global_dimming
-        if 4 < ledidx < 8 or 12 < ledidx < 16 or 20 < ledidx < 24 or 28 < ledidx:  # Red led indices
-            dimmed = dimmed * self.colorled_red_dimming
+        if ledidx in RED_LEDS_IDX:
+            dimmed = dimmed * RED_LEDS_DIM
         send_value = round(dimmed * 255)
         self.logger.debug('#{} send_value={} (normalized was {:0.3f})'.format(ledidx, send_value, dimmed))
         # These have no aliases, we know that the colorleds are on board 1
@@ -384,22 +537,25 @@ class ReactorState:  # pylint: disable=R0902
         return self.aliases[alias]['PROXY'].set_value(send_value)
 
     @log_exceptions
-    def _handle_commands(self, run_coros):
+    async def _handle_commands(self, run_coros):
         """Send and time ardubus commands"""
         now = time.time()
         self.logger.debug('About to process {} commands'.format(len(run_coros)))
-        # asyncio.get_event_loop().run_until_complete(asyncio.gather(*run_coros))
-        # these all depend on same lock so maybe better to handle them sequentially
+        # await asyncio.gather(*run_coros)
+        # these all depend on same lock so maybe better to handle them sequentially and rate-limit
+        rate_limit = len(run_coros) > 1
         for coro in run_coros:
-            asyncio.get_event_loop().run_until_complete(coro)
-            time.sleep(0.002)  # Rate limit the spam since we don't wait for responses
+            await coro
+            if rate_limit:
+                await asyncio.sleep(0.001)  # Rate limit the spam since we don't wait for responses
         diff = round((time.time() - now) * 1000)
         self.logger.debug('Commands done in {}ms'.format(diff))
 
     @log_exceptions
-    def _do_full_update(self):
+    async def _do_full_update(self):
         """Send all values to HW"""
         self.logger.debug('called')
+        self.full_update_pending = False
         # Keep track of what we need to do
         run_coros = []
         # Add all aliased values to the queue
@@ -414,7 +570,7 @@ class ReactorState:  # pylint: disable=R0902
         # Top-text/number
         run_coros.append(self._update_toptext())
         # Run all the jobs
-        self._handle_commands(run_coros)
+        await self._handle_commands(run_coros)
         self.last_full_update = time.time()
 
     @log_exceptions
@@ -472,12 +628,14 @@ class ReactorState:  # pylint: disable=R0902
                     'lights': {'3_3': True},
                     'status': 'broken',
                 }
+                self.backend_state_changed_flag = True
 
             # Whether *we* changed the state
             state_changed = False
             if self.commit_arm_state == CommitState.send_commit:
                 self.commit_arm_state = CommitState.commit_sent
                 self.backend_state['status'] = 'fixed'
+                self.use_random_blinkenlichten = BLINKENLICHTEN_DEFAULT
                 state_changed = True
 
             if state_changed:
