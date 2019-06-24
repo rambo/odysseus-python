@@ -193,7 +193,6 @@ class ReactorState:  # pylint: disable=R0902
             return run_coros
 
         # Set defined topleds to values according to expectation
-        set_leds = []
         with self.backend_state_lock:
             # self.logger.debug('"expected" backend state: {}'.format(repr(self.backend_state['expected'])))
             # self.logger.debug('"lights" backend state: {}'.format(repr(self.backend_state['lights'])))
@@ -204,7 +203,6 @@ class ReactorState:  # pylint: disable=R0902
                 exp_value = self.backend_state['expected'][position]
                 led_value = float(self.backend_state['lights'][position])
                 led_alias = 'rod_{}_led'.format(position)
-                set_leds.append(led_alias)
                 if self._gauge_within_expected(position, exp_value):
                     self.topled_values[led_alias] = led_value
                 else:
@@ -213,19 +211,14 @@ class ReactorState:  # pylint: disable=R0902
                 if not self.full_update_pending:
                     run_coros.append(self._update_topled_value(led_alias))
 
-        # Make sure all other LEDs are off.
-        for led_alias in self.topled_values:
-            if led_alias not in set_leds:
-                self.topled_values[led_alias] = 0.0
-                if not self.full_update_pending:
-                    run_coros.append(self._update_topled_value(led_alias))
+        # Make sure all other LEDs are off. (was a bad idea afterall)
 
         return run_coros
 
     @log_exceptions
     async def _invalid_commit_punish(self):  # pylint: disable=R0912
         """Punishment for invalid commit"""
-        global RED_LEDS_DIM
+        global RED_LEDS_DIM  # pylint: disable=W0603
         self.logger.info('PUNISH!!!')
         # Randomize gauge values
         run_commands = []
