@@ -304,7 +304,10 @@ class ReactorState:  # pylint: disable=R0902
     def _local_update_loop_blinkenlighten(self, run_coros):
         """Blink the gauge LEDs randomly"""
         for idx, current_val in enumerate(self.colorled_values):
-            if random.random() > 0.05:
+            change_prob = 0.05
+            if self.backend_state and self.backend_state.get('broken_jump', False):
+                change_prob = 0.25
+            if random.random() > change_prob:
                 continue
             if current_val > 0:
                 self.colorled_values[idx] = 0.0
@@ -313,6 +316,41 @@ class ReactorState:  # pylint: disable=R0902
             if not self.full_update_pending:
                 run_coros.append(self._update_colorled_value(idx))
         return run_coros
+
+    @log_exceptions
+    async def _enter_broken_jump_effect(self):
+        """Effect to run when 'jump_broken' is true, for now just copied the blinkenlichten thing but for topleds"""
+        interval = (1.0 / LOCAL_UPDATE_FPS)
+        change_prob = 0.15
+        while self.backend_state and self.backend_state.get('broken_jump', False):
+            # Keep track of what we need to do
+            now = time.time()
+            run_coros = []
+
+            for alias in self.topled_values:
+                # Check for broken state so we won't mess with the actual fixing task by blinking the topleds
+                with self.backend_state_lock:
+                    if self.backend_state.get('status', 'undef') == 'broken':
+                        continue
+                    current_val = self.topled_values[alias]
+                    if random.random() > change_prob:
+                        continue
+                    if current_val > 0:
+                        self.topled_values[alias] = 0.0
+                    else:
+                        self.topled_values[alias] = random.choice((0.5, 1.0))
+                    if not self.full_update_pending:
+                        run_coros.append(self._update_topled_value(alias))
+
+            if self.full_update_pending:
+                asyncio.get_event_loop().create_task(self._do_full_update())
+            elif run_coros:
+                asyncio.get_event_loop().create_task(self._handle_commands(run_coros))
+
+            # sleep until it's time to do things again
+            spent_time = time.time() - now
+            if spent_time < interval:
+                await asyncio.sleep(interval - spent_time)
 
     @log_exceptions
     async def _enter_broken_effect(self):
@@ -407,12 +445,14 @@ class ReactorState:  # pylint: disable=R0902
                 self.full_update_pending = True
 
             # Reset stuff that needs reset when backend state changes
-            if self.backend_state_changed_flag:
+            if self.backend_state_changed_flag and self.backend_state:
                 self.backend_state_changed_flag = False
                 # Stop random blink when we're broken (fixed state resets this in the framework update method)
                 if self.backend_state.get('status', 'undef') == 'broken':
                     self.use_random_blinkenlichten = False
                     asyncio.get_event_loop().create_task(self._enter_broken_effect())
+                if self.backend_state.get('broken_jump', False):
+                    asyncio.get_event_loop().create_task(self._enter_broken_jump_effect())
                 # Top-leds
                 run_coros = self._local_update_loop_reset_topleds(run_coros)
                 # top-text
