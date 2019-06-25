@@ -23,7 +23,7 @@ from odysseus.taskbox import TaskBoxRunner  # isort:skip ; # pylint: disable=C04
 
 FRAMEWORK_UPDATE_FPS = 15  # How often to call updates
 LOCAL_UPDATE_FPS = 25  # How often the local logic loop does stuff
-FORCE_UPDATE_INTERVAL = 10.0  # How often to force-update all states to HW
+FORCE_UPDATE_INTERVAL = 30.0  # How often to force-update all states to HW
 GAUGE_TICK_SPEED = (1.0 / LOCAL_UPDATE_FPS) / 7.5  # 7.5 seconds to run gauge from (normalized) end to end
 GAUGE_MAX_HW_VALUE = 180
 GAUGE_LEEWAY = GAUGE_TICK_SPEED * 4  # by how much the guage value can be off the backend expected
@@ -146,7 +146,7 @@ class ReactorState:  # pylint: disable=R0902
                     else:
                         self.logger.debug('Moving {} DOWN'.format(gauge_alias))
                         new_value = self.gauge_values[gauge_alias] - GAUGE_TICK_SPEED
-                elif self.backend_state.get('jumping', False):
+                elif self.backend_state and self.backend_state.get('jumping', False):
                     # If not actively controlled and jumping, slowly drift gauges down
                     new_value = self.gauge_values[gauge_alias] - JUMPING_GAUGE_DRIFT_SPEED
 
@@ -304,7 +304,7 @@ class ReactorState:  # pylint: disable=R0902
     def _local_update_loop_blinkenlighten(self, run_coros):
         """Blink the gauge LEDs randomly"""
         for idx, current_val in enumerate(self.colorled_values):
-            if random.random() > 0.10:
+            if random.random() > 0.05:
                 continue
             if current_val > 0:
                 self.colorled_values[idx] = 0.0
@@ -572,6 +572,9 @@ class ReactorState:  # pylint: disable=R0902
         # Run all the jobs
         await self._handle_commands(run_coros)
         self.last_full_update = time.time()
+        # Top-text is kinda important so update it twice
+        await asyncio.sleep(0.1)
+        await self._update_toptext()
 
     @log_exceptions
     def ardubus_callback(self, event):
