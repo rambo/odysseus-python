@@ -146,7 +146,7 @@ class ReactorState:  # pylint: disable=R0902
                     else:
                         self.logger.debug('Moving {} DOWN'.format(gauge_alias))
                         new_value = self.gauge_values[gauge_alias] - GAUGE_TICK_SPEED
-                elif self.backend_state.get('jumping', False):
+                elif self.backend_state and self.backend_state.get('jumping', False):
                     # If not actively controlled and jumping, slowly drift gauges down
                     new_value = self.gauge_values[gauge_alias] - JUMPING_GAUGE_DRIFT_SPEED
 
