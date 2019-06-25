@@ -201,6 +201,7 @@ class ReactorState:  # pylint: disable=R0902
             return run_coros
 
         # Set defined topleds to values according to expectation
+        leds_remaining = set(self.topled_values.keys())
         with self.backend_state_lock:
             # self.logger.debug('"expected" backend state: {}'.format(repr(self.backend_state['expected'])))
             # self.logger.debug('"lights" backend state: {}'.format(repr(self.backend_state['lights'])))
@@ -217,9 +218,13 @@ class ReactorState:  # pylint: disable=R0902
                     self.topled_values[led_alias] = 1.0 - led_value
                     self.gauges_match_expected = False
                 if not self.full_update_pending:
+                    leds_remaining.remove(led_alias)
                     run_coros.append(self._update_topled_value(led_alias))
 
-        # Make sure all other LEDs are off. (was a bad idea afterall)
+        # Update some extra leds every iteration (to get eventually rid of glitched ones)
+        if not self.full_update_pending and leds_remaining:
+            led_alias = random.choice(tuple(leds_remaining))
+            run_coros.append(self._update_topled_value(led_alias))
 
         return run_coros
 
@@ -471,6 +476,9 @@ class ReactorState:  # pylint: disable=R0902
             run_coros = self._local_update_loop_check_gauges(run_coros)
             if self.use_random_blinkenlichten:
                 run_coros = self._local_update_loop_blinkenlighten(run_coros)
+            else:
+                # update random led to eventually clear glitches
+                run_coros.append(self._update_colorled_value(random.randrange(len(self.colorled_values))))
 
             # Arming and committing
             if handled_arm_state != self.commit_arm_state:
@@ -617,7 +625,8 @@ class ReactorState:  # pylint: disable=R0902
             run_coros.append(self._update_colorled_value(idx))
         # Top-text/number
         run_coros.append(self._update_toptext())
-        # Run all the jobs
+        # Run all the jobs (in random order just in case some specific access pattern is more likely to glitch
+        random.shuffle(run_coros)
         await self._handle_commands(run_coros)
         self.last_full_update = time.time()
         # Top-text is kinda important so update it twice
