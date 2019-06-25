@@ -116,8 +116,9 @@ class ReactorState:  # pylint: disable=R0902
         self.local_update_thread.start()
 
     @log_exceptions
-    def _local_update_loop_move_gauges(self, run_coros):
+    def _local_update_loop_move_gauges(self, run_coros):  # pylint: disable=R0912
         """Handle the gauge update part"""
+        remaining_gauges = set(self.gauge_values.keys())
         with self.event_state_lock:
             # Move gauges
             for gauge_alias in self.gauge_values:
@@ -159,9 +160,16 @@ class ReactorState:  # pylint: disable=R0902
                     new_value = 1.0
                 # Schedule immediate update if needed
                 if not self.full_update_pending and new_value != self.gauge_values[gauge_alias]:
+                    remaining_gauges.remove(gauge_alias)
                     run_coros.append(self._update_gauge_value(gauge_alias))
                 # The actual hw update is executed later so this is fine.
                 self.gauge_values[gauge_alias] = new_value
+
+        # Update some extra gauges every iteration (to get eventually rid of glitched ones)
+        if not self.full_update_pending and remaining_gauges:
+            gauge_alias = random.choice(tuple(remaining_gauges))
+            run_coros.append(self._update_gauge_value(gauge_alias))
+
         return run_coros
 
     @log_exceptions
