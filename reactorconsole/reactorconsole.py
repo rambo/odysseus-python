@@ -24,7 +24,7 @@ from odysseus.taskbox import TaskBoxRunner  # isort:skip ; # pylint: disable=C04
 FRAMEWORK_UPDATE_FPS = 15  # How often to call updates
 LOCAL_UPDATE_FPS = 25  # How often the local logic loop does stuff
 FORCE_UPDATE_INTERVAL = 30.0  # How often to force-update all states to HW
-GAUGE_TICK_SPEED = (1.0 / LOCAL_UPDATE_FPS) / 2  # 7.5 seconds to run gauge from (normalized) end to end
+GAUGE_TICK_SPEED = round((1.0 / LOCAL_UPDATE_FPS) / 2, 2)  # 2 seconds to run gauge from (normalized) end to end
 GAUGE_MAX_HW_VALUE = 180
 GAUGE_LEEWAY = round(GAUGE_TICK_SPEED * 7, 2)  # by how much the gauge value can be off the backend expected
 ARMED_TOP_TEXT = '-----'
@@ -98,6 +98,7 @@ class ReactorState:  # pylint: disable=R0902
     use_random_blinkenlichten = BLINKENLICHTEN_DEFAULT
     full_update_pending = False
     last_topled_pattern_update = 0
+    last_topled_status_print = 0
 
     def __init__(self, serialpath='/dev/ttyUSB0', devicesyml_path='./ardubus_devices.yml', loglevel=logging.INFO):
         self.serialpath = serialpath
@@ -255,12 +256,17 @@ class ReactorState:  # pylint: disable=R0902
             self.logger.error('Key "expected" not in backend state, aborting check')
             return run_coros
 
-        # Set defined topleds to values according to expectation
+        report_led_status = False
+        if time.time() - self.last_topled_status_print > 10:
+            report_led_status = True
+            self.last_topled_status_print = time.time()
+
         force_check = False
         if time.time() - self.last_topled_pattern_update > 1:
             force_check = True
             self.last_topled_pattern_update = time.time()
 
+        # Set defined topleds to values according to expectation
         leds_remaining = set(self.topled_values.keys())
         with self.backend_state_lock:
             # self.logger.debug('"expected" backend state: {}'.format(repr(self.backend_state['expected'])))
@@ -272,7 +278,9 @@ class ReactorState:  # pylint: disable=R0902
                 if position not in self.backend_state['lights']:
                     self.logger.error('No light state defined for expected position {}'.format(position))
                     continue
-                led_value = float(self.backend_state['lights'][position])
+                led_value = 0.0
+                if self.backend_state['lights'][position]:
+                    led_value = 1.0
                 led_alias = 'rod_{}_led'.format(position)
                 gauge_alias = 'rod_{}_gauge'.format(position)
 
@@ -291,8 +299,14 @@ class ReactorState:  # pylint: disable=R0902
                     continue
 
                 if self._gauge_within_expected(position):
+                    if report_led_status:
+                        self.logger.info('position {} is OK, led_Value={}'.format(position, led_value))
                     self.topled_values[led_alias] = led_value
                 else:
+                    if report_led_status:
+                        self.logger.info('position {} is NFG (expected={}, value={:.2f}), led_value={}'.format(
+                            position, self.backend_state['expected'], self.gauge_values[gauge_alias], led_value
+                        ))
                     self.topled_values[led_alias] = 1.0 - led_value
                     self.gauges_match_expected = False
                 if not self.full_update_pending:
