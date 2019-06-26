@@ -259,7 +259,7 @@ rod_control_panel: # The board identifier
     pca9535_boards: [ 0 ] # list of board addresses  (aka ARDUBUS_PCA9535_BOARDS)
     pca9535_inputs: # pins passed to ARDUBUS_PCA9535_INPUTS
         - pin: 0
-          alias: SCRAM
+          alias: unused_SCRAM
         - pin: 1
           alias: commit_arm_key
         - pin: 2
