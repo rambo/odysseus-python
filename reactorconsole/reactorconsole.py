@@ -24,9 +24,9 @@ from odysseus.taskbox import TaskBoxRunner  # isort:skip ; # pylint: disable=C04
 FRAMEWORK_UPDATE_FPS = 15  # How often to call updates
 LOCAL_UPDATE_FPS = 25  # How often the local logic loop does stuff
 FORCE_UPDATE_INTERVAL = 30.0  # How often to force-update all states to HW
-GAUGE_TICK_SPEED = (1.0 / LOCAL_UPDATE_FPS) / 7.5  # 7.5 seconds to run gauge from (normalized) end to end
+GAUGE_TICK_SPEED = (1.0 / LOCAL_UPDATE_FPS) / 2  # 7.5 seconds to run gauge from (normalized) end to end
 GAUGE_MAX_HW_VALUE = 180
-GAUGE_LEEWAY = GAUGE_TICK_SPEED * 4  # by how much the guage value can be off the backend expected
+GAUGE_LEEWAY = round(GAUGE_TICK_SPEED * 7, 2)  # by how much the gauge value can be off the backend expected
 ARMED_TOP_TEXT = '-----'
 RED_LEDS_IDX = (
     4, 5, 6, 7,
@@ -38,6 +38,11 @@ RED_LEDS_DIM = 0.1
 COLORLED_DEFAULT_GLOBAL_DIM = 0.25
 BLINKENLICHTEN_DEFAULT = True
 JUMPING_GAUGE_DRIFT_SPEED = (1.0 / LOCAL_UPDATE_FPS) / 90  # 1.5 minutes to drift from full to down
+ALLOW_PUNISH = False
+BROKEN_TOPLEDS = (
+    '5_3',
+    '3_0'
+)
 
 
 def log_exceptions(func, re_raise=True):
@@ -92,6 +97,7 @@ class ReactorState:  # pylint: disable=R0902
     arm_previous_top_text = ''
     use_random_blinkenlichten = BLINKENLICHTEN_DEFAULT
     full_update_pending = False
+    last_topled_pattern_update = 0
 
     def __init__(self, serialpath='/dev/ttyUSB0', devicesyml_path='./ardubus_devices.yml', loglevel=logging.INFO):
         self.serialpath = serialpath
@@ -173,46 +179,118 @@ class ReactorState:  # pylint: disable=R0902
         return run_coros
 
     @log_exceptions
-    def _gauge_within_expected(self, position, exp_value):
+    def _gauge_within_expected(self, position):
         """Check if gauge is close enough to exepected value"""
         gauge_alias = 'rod_{}_gauge'.format(position)
+        if position in BROKEN_TOPLEDS:
+            self.logger.warning('top-LED {} is broken, returning true'.format(position))
+            return True
+
+        if 'expected' not in self.backend_state:
+            self.logger.error('Key "expected" not in backend state, aborting check')
+            return True
+
+        exp_value = self.backend_state['expected'][position]
 
         if gauge_alias not in self.gauge_values:
-            self.logger.error('No gauge {} defined'.format(gauge_alias))
+            self.logger.error('No gauge "{}" defined'.format(gauge_alias))
             return False
 
-        upper_bound = exp_value + GAUGE_LEEWAY
-        lower_bound = exp_value - GAUGE_LEEWAY
+        upper_bound = round(exp_value + GAUGE_LEEWAY, 2)
+        lower_bound = round(exp_value - GAUGE_LEEWAY, 2)
         # self.logger.debug('{} check {} < {} < {}'.format(gauge_alias, lower_bound,
         #                                                  self.gauge_values[gauge_alias], upper_bound))
-        if lower_bound < self.gauge_values[gauge_alias] < upper_bound:
+        if lower_bound < round(self.gauge_values[gauge_alias], 2) < upper_bound:
             return True
         return False
 
     @log_exceptions
-    def _local_update_loop_check_gauges(self, run_coros):
+    async def _test_topleds(self):
+        """Turn all top-leds on and off"""
+        run_coros = []
+        self.logger.info('Turning top-LED on')
+        for led_alias in self.aliases:
+            if not led_alias.endswith('_led'):
+                continue
+            self.topled_values[led_alias] = 1.0
+            run_coros.append(self._update_topled_value(led_alias))
+        await self._handle_commands(run_coros)
+        await asyncio.sleep(2)
+        run_coros = []
+        self.logger.info('Turning top-LED off')
+        for led_alias in self.aliases:
+            if not led_alias.endswith('_led'):
+                continue
+            self.topled_values[led_alias] = 0.0
+            run_coros.append(self._update_topled_value(led_alias))
+        await self._handle_commands(run_coros)
+
+    @log_exceptions
+    async def _test_colorleds(self):
+        run_coros = []
+        self.logger.info('Turning color-LEDs on')
+        for idx, _ in enumerate(self.colorled_values):
+            self.colorled_values[idx] = 1.0
+            run_coros.append(self._update_colorled_value(idx))
+        await self._handle_commands(run_coros)
+        await asyncio.sleep(2)
+        run_coros = []
+        self.logger.info('Turning color-LEDs off')
+        for idx, _ in enumerate(self.colorled_values):
+            self.colorled_values[idx] = 0.0
+            run_coros.append(self._update_colorled_value(idx))
+        await self._handle_commands(run_coros)
+
+    @log_exceptions
+    def _local_update_loop_check_gauges(self, run_coros):  # pylint: disable=R0912
         """Check backend expected vs current value and set the topleds accordingly"""
         self.gauges_match_expected = True
         if not self.backend_state:
             self.logger.warning('No backend state yet, aborting check')
+            return run_coros
+        if self.backend_state.get('status', 'undef') != 'broken':
+            self.logger.debug('Status is not "broken", skipping check')
             return run_coros
         if 'expected' not in self.backend_state:
             self.logger.error('Key "expected" not in backend state, aborting check')
             return run_coros
 
         # Set defined topleds to values according to expectation
+        force_check = False
+        if time.time() - self.last_topled_pattern_update > 1:
+            force_check = True
+            self.last_topled_pattern_update = time.time()
+
         leds_remaining = set(self.topled_values.keys())
         with self.backend_state_lock:
             # self.logger.debug('"expected" backend state: {}'.format(repr(self.backend_state['expected'])))
             # self.logger.debug('"lights" backend state: {}'.format(repr(self.backend_state['lights'])))
             for position in self.backend_state['expected']:
+                if position in BROKEN_TOPLEDS:
+                    # Skip ones where we have no feedback to the user
+                    continue
                 if position not in self.backend_state['lights']:
                     self.logger.error('No light state defined for expected position {}'.format(position))
                     continue
-                exp_value = self.backend_state['expected'][position]
                 led_value = float(self.backend_state['lights'][position])
                 led_alias = 'rod_{}_led'.format(position)
-                if self._gauge_within_expected(position, exp_value):
+                gauge_alias = 'rod_{}_gauge'.format(position)
+
+                # Safety against nonexisting leds/gauges
+                if led_alias not in self.aliases:
+                    # self.logger.error('No top-LED "{}", aborting check for this position'.format(led_alias))
+                    continue
+                if gauge_alias not in self.aliases:
+                    # self.logger.error('No gauge "{}", aborting check for this position'.format(gauge_alias))
+                    continue
+
+                up_alias = gauge_alias.replace('_gauge', '_up')
+                dn_alias = gauge_alias.replace('_gauge', '_down')
+                if not force_check and not self.gauge_directions[up_alias] and not self.gauge_directions[dn_alias]:
+                    # Skip gauges that have not been moved
+                    continue
+
+                if self._gauge_within_expected(position):
                     self.topled_values[led_alias] = led_value
                 else:
                     self.topled_values[led_alias] = 1.0 - led_value
@@ -229,18 +307,29 @@ class ReactorState:  # pylint: disable=R0902
         return run_coros
 
     @log_exceptions
-    async def _invalid_commit_punish(self):  # pylint: disable=R0912
+    async def _invalid_commit_punish(self):  # pylint: disable=R0912,R0914
         """Punishment for invalid commit"""
         global RED_LEDS_DIM  # pylint: disable=W0603
-        self.logger.info('PUNISH!!!')
+        self.logger.info('Expected leeway is +/-{}'.format(GAUGE_LEEWAY))
+        for position in self.backend_state['expected']:
+            gauge_alias = 'rod_{}_gauge'.format(position)
+            # Ignore invalid positions
+            if gauge_alias not in self.gauge_values:
+                continue
+            if not self._gauge_within_expected(position):
+                self.logger.info('{}(={:.2f}) not within expected(={:.2f})'.format(
+                    gauge_alias, self.gauge_values[gauge_alias], self.backend_state['expected'][position]
+                ))
         # Randomize gauge values
         run_commands = []
-        for alias in self.gauge_values:
-            backend_key = alias.replace('_gauge', '').replace('rod_', '')
-            if random.random() > 0.5 or backend_key in self.backend_state['expected']:
-                self.gauge_values[alias] = random.random()
-                if not self.full_update_pending:
-                    run_commands.append(self._update_gauge_value(alias))
+        # Disable punishment for for now.
+        if ALLOW_PUNISH:
+            for alias in self.gauge_values:
+                backend_key = alias.replace('_gauge', '').replace('rod_', '')
+                if random.random() > 0.5 or backend_key in self.backend_state['expected']:
+                    self.gauge_values[alias] = random.random()
+                    if not self.full_update_pending:
+                        run_commands.append(self._update_gauge_value(alias))
         # Red LEDs pulse-effect
         blinker_backup = self.use_random_blinkenlichten
         red_fade_backup = RED_LEDS_DIM
@@ -507,6 +596,8 @@ class ReactorState:  # pylint: disable=R0902
         self.logger.debug('Wait for arduino to finish initializing')
         time.sleep(2.0)
         # Add the local update as task and start the asyncioloop
+        asyncio.get_event_loop().run_until_complete(self._test_topleds())
+        asyncio.get_event_loop().run_until_complete(self._test_colorleds())
         asyncio.get_event_loop().create_task(self._local_update_loop())
         loop.run_forever()
 
@@ -574,9 +665,16 @@ class ReactorState:  # pylint: disable=R0902
         # These have no aliases, we know that the colorleds are on board 1
         return self.ardubus['pca9635RGBJBOL_maps'][1][ledidx]['PROXY'].set_value(send_value)
 
+    async def _dummytask(self):
+        """Does nothing, used to return coro from stuff that must always return one even if sanity checks fail"""
+
     @log_exceptions
     def _update_topled_value(self, alias):
         """Maps the normalized led value to the hw value and returns a coroutine that sends it"""
+        if alias not in self.aliases or alias not in self.topled_values:
+            self.logger.error('Invalid top-LED alias "{}"'.format(alias))
+            return self._dummytask()
+
         dimmed = self.topled_values[alias] * self.global_led_dimming_factor
         send_value = round(dimmed * 255)
         self.logger.debug('{} send_value={} (normalized was {:0.3f})'.format(alias, send_value, dimmed))
@@ -586,6 +684,10 @@ class ReactorState:  # pylint: disable=R0902
     @log_exceptions
     def _update_gauge_value(self, alias):
         """Maps the normalized gauge value to the hw value and returns a coroutine that sends it"""
+        if alias not in self.aliases or alias not in self.gauge_values:
+            self.logger.error('Invalid gauge alias "{}"'.format(alias))
+            return self._dummytask()
+
         send_value = round(self.gauge_values[alias] * GAUGE_MAX_HW_VALUE)
         self.logger.debug('{} send_value={} (normalized was {:0.3f})'.format(alias, send_value,
                                                                              self.gauge_values[alias]))
@@ -697,6 +799,7 @@ class ReactorState:  # pylint: disable=R0902
                 self.backend_state['status'] = 'fixed'
                 self.use_random_blinkenlichten = BLINKENLICHTEN_DEFAULT
                 state_changed = True
+                self.backend_state_changed_flag = True
 
             if state_changed:
                 return self.backend_state
