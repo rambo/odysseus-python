@@ -249,17 +249,21 @@ class ReactorState:  # pylint: disable=R0902
         if not self.backend_state:
             self.logger.warning('No backend state yet, aborting check')
             return run_coros
+
+        report_led_status = False
+        if time.time() - self.last_topled_status_print > 10:
+            report_led_status = True
+            self.last_topled_status_print = time.time()
+
+        if report_led_status:
+            self.logger.info('Status is "{}"'.format(self.backend_state.get('status', 'undef')))
+
         if self.backend_state.get('status', 'undef') != 'broken':
             self.logger.debug('Status is not "broken", skipping check')
             return run_coros
         if 'expected' not in self.backend_state:
             self.logger.error('Key "expected" not in backend state, aborting check')
             return run_coros
-
-        report_led_status = False
-        if time.time() - self.last_topled_status_print > 10:
-            report_led_status = True
-            self.last_topled_status_print = time.time()
 
         force_check = False
         if time.time() - self.last_topled_pattern_update > 1:
