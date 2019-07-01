@@ -47,6 +47,7 @@ default_state = {
         "driftDelayAfterAdjust": 60, # number of secs to pause drift after adjustment is done
         "adjustUpAmount": 0.3,       # amount to adjust up per call (pressure rise)
         "adjustDownAmount": 1,       # amount to adjust down per call (pressure release)
+        "probDriftDown": 0.66,       # probability drift will go downwards (otherwise upward)
     }
 }
 
@@ -77,7 +78,7 @@ def logic(state, backend_change):
         state["driftPause"] = config["driftDelayAfterAdjust"]
         state["rndMagnitude"] = config["maxRndMagnitude"]
         state["drift"] = random.uniform(state["minDriftPerMinute"], state["maxDriftPerMinute"])
-        if random.random() < 0.5:
+        if random.random() < config["probDriftDown"]:
             state["drift"] = -state["drift"]
 
 
