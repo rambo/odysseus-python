@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Talk with the backend, communicate with local logic via ZMQ"""
 import json
 import logging
@@ -42,8 +43,9 @@ class BackendComs:
     def framework_update(self, state, backend_changed):
         """Called by the odysseys framework periodically"""
         self.logger.debug('called with state: {}'.format(repr(state)))
-        if backend_changed:
-            self.zmq_pub_socket.send_multipart(b'backend2local', json.dumps(state, ensure_ascii=False).encode('utf-8'))
+        if backend_changed and state:
+            jsonstr = json.dumps(state, ensure_ascii=False)
+            self.zmq_pub_socket.send_multipart([b'backend2local', jsonstr.encode('utf-8')])
 
         local_state_received = False
         try:

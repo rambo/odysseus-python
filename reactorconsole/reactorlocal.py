@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Local logic loop for the reactor console"""
 import asyncio
 import enum
@@ -5,9 +6,12 @@ import json
 import logging
 import random
 import signal as posixsignal
+import threading
 import time
 
 import ardubus_core
+import ardubus_core.deviceconfig
+import ardubus_core.transport
 import zmq
 import zmq.asyncio
 
@@ -60,7 +64,6 @@ class ReactorConsole:
     colorled_values = None
     last_full_update = 0
     logger = None
-    local_update_thread = None
     keep_running = True
     backend_state = None
     global_led_dimming_factor = 1.0
@@ -94,8 +97,8 @@ class ReactorConsole:
         self.zmq_sub_socket.connect('ipc:///tmp/reactor_backend.zmq')
         self.zmq_sub_socket.subscribe(b'backend2local')
 
-        self.event_state_lock = asyncio.Lock()
-        self.backend_state_lock = asyncio.Lock()
+        self.event_state_lock = threading.Lock()
+        self.backend_state_lock = threading.Lock()
         self.backend_state_changed_flag = False
         self.backend_state = {}
         self.aliases = {}
@@ -257,6 +260,7 @@ class ReactorConsole:
 
         # Set defined topleds to values according to expectation
         leds_remaining = set(self.topled_values.keys())
+        ok_positions = []
         with self.backend_state_lock:
             # self.logger.debug('"expected" backend state: {}'.format(repr(self.backend_state['expected'])))
             # self.logger.debug('"lights" backend state: {}'.format(repr(self.backend_state['lights'])))
@@ -291,6 +295,7 @@ class ReactorConsole:
                     if report_led_status:
                         self.logger.info('position {} is OK, led_Value={}'.format(position, led_value))
                     self.topled_values[led_alias] = led_value
+                    ok_positions.append(gauge_alias)
                 else:
                     if report_led_status:
                         self.logger.info('position {} is NFG (expected={}, value={:.2f}), led_value={}'.format(
@@ -301,6 +306,11 @@ class ReactorConsole:
                 if not self.full_update_pending:
                     leds_remaining.remove(led_alias)
                     run_coros.append(self._update_topled_value(led_alias))
+
+        if force_check:
+            self.logger.info('OK Gauges: {}/{} (flag={})'.format(
+                len(self.backend_state['expected']), len(ok_positions), self.gauges_match_expected
+            ))
 
         # Update some extra leds every iteration (to get eventually rid of glitched ones)
         if not self.full_update_pending and leds_remaining:
@@ -536,7 +546,6 @@ class ReactorConsole:
     @log_exceptions
     async def _local_update_loop(self):
         """Coroutine that runs the main hw update loop"""
-        await self._reset_console_values()
         self.logger.debug('Starting loop')
         handled_arm_state = None
         self.arm_previous_top_text = ''
@@ -742,8 +751,8 @@ class ReactorConsole:
     async def _zmq_send_fixed(self):
         """Set status to fixed and send it"""
         self.backend_state['status'] = 'fixed'
-        await self.zmq_pub_socket.send_multipart(b'local2backend',
-                                                 json.dumps(self.backend_state, ensure_ascii=False).encode('utf-8'))
+        jsonstr = json.dumps(self.backend_state, ensure_ascii=False)
+        await self.zmq_pub_socket.send_multipart([b'local2backend', jsonstr.encode('utf-8')])
         self.commit_arm_state = CommitState.commit_sent
 
     async def _zmq_receiver(self):
@@ -780,12 +789,15 @@ class ReactorConsole:
         self.loop.add_signal_handler(posixsignal.SIGHUP, self.quit)
         self._init_ardubus_transport()
         time.sleep(2.0)
-        # Run some test blinks first
+        # Reset everything
+        self.loop.run_until_complete(self._reset_console_values())
+        # Run some test blinks
         self.loop.run_until_complete(self._test_topleds())
         self.loop.run_until_complete(self._test_colorleds())
 
         # Add the local update as task and start the asyncioloop
-        self.loop.run_until_complete(self._zmq_receiver())
+        self.keep_running = True
+        self.loop.create_task(self._zmq_receiver())
         self.loop.create_task(self._local_update_loop())
 
         self.loop.run_forever()
@@ -800,7 +812,7 @@ if __name__ == '__main__':
     # FIXME: Add ports, paths and loglevel from cli
     REACTORCONSOLE = ReactorConsole()
     # Set debug only for our local logger
-    REACTORCONSOLE.logger.setLevel(logging.DEBUG)
+    # REACTORCONSOLE.logger.setLevel(logging.DEBUG)
     try:
         REACTORCONSOLE.run()
     except KeyboardInterrupt:
