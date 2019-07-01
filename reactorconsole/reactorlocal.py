@@ -8,6 +8,7 @@ import random
 import signal as posixsignal
 import threading
 import time
+import traceback
 
 import ardubus_core
 import ardubus_core.deviceconfig
@@ -77,6 +78,7 @@ class ReactorConsole:
     full_update_pending = False
     last_topled_pattern_update = 0
     last_topled_status_print = 0
+    already_broken = False
 
     def __init__(self, serialpath='/dev/ttyUSB0', devicesyml_path='./ardubus_devices.yml'):
         ardubus_core.init_logging(logging.INFO)
@@ -235,7 +237,7 @@ class ReactorConsole:
         """Check backend expected vs current value and set the topleds accordingly"""
         self.gauges_match_expected = True
         if not self.backend_state:
-            self.logger.warning('No backend state yet, aborting check')
+            # self.logger.warning('No backend state yet, aborting check')
             return run_coros
 
         report_led_status = False
@@ -253,9 +255,9 @@ class ReactorConsole:
             self.logger.error('Key "expected" not in backend state, aborting check')
             return run_coros
 
-        force_check = False
+        force_led_update = False
         if time.time() - self.last_topled_pattern_update > 1:
-            force_check = True
+            force_led_update = True
             self.last_topled_pattern_update = time.time()
 
         # Set defined topleds to values according to expectation
@@ -264,7 +266,7 @@ class ReactorConsole:
         with self.backend_state_lock:
             # self.logger.debug('"expected" backend state: {}'.format(repr(self.backend_state['expected'])))
             # self.logger.debug('"lights" backend state: {}'.format(repr(self.backend_state['lights'])))
-            for position in self.backend_state['expected']:
+            for position in sorted(self.backend_state['expected'].keys()):
                 if position in BROKEN_TOPLEDS:
                     # Skip ones where we have no feedback to the user
                     continue
@@ -287,9 +289,6 @@ class ReactorConsole:
 
                 up_alias = gauge_alias.replace('_gauge', '_up')
                 dn_alias = gauge_alias.replace('_gauge', '_down')
-                if not force_check and not self.gauge_directions[up_alias] and not self.gauge_directions[dn_alias]:
-                    # Skip gauges that have not been moved
-                    continue
 
                 if self._gauge_within_expected(position):
                     if report_led_status:
@@ -299,17 +298,23 @@ class ReactorConsole:
                 else:
                     if report_led_status:
                         self.logger.info('position {} is NFG (expected={}, value={:.2f}), led_value={}'.format(
-                            position, self.backend_state['expected'], self.gauge_values[gauge_alias], led_value
+                            position, self.backend_state['expected'][position],
+                            self.gauge_values[gauge_alias], led_value
                         ))
                     self.topled_values[led_alias] = 1.0 - led_value
                     self.gauges_match_expected = False
+
+                if not force_led_update and not self.gauge_directions[up_alias] and not self.gauge_directions[dn_alias]:
+                    # Skip led updates that have not been moved
+                    continue
+
                 if not self.full_update_pending:
                     leds_remaining.remove(led_alias)
                     run_coros.append(self._update_topled_value(led_alias))
 
-        if force_check:
+        if report_led_status:
             self.logger.info('OK Gauges: {}/{} (flag={})'.format(
-                len(self.backend_state['expected']), len(ok_positions), self.gauges_match_expected
+                len(ok_positions), len(self.backend_state['expected']), self.gauges_match_expected
             ))
 
         # Update some extra leds every iteration (to get eventually rid of glitched ones)
@@ -461,7 +466,7 @@ class ReactorConsole:
             if self.full_update_pending:
                 asyncio.get_event_loop().create_task(self._do_full_update())
             elif run_coros:
-                asyncio.get_event_loop().create_task(self._handle_commands(run_coros))
+                await self._handle_commands(run_coros)
 
             # sleep until it's time to do things again
             spent_time = time.time() - now
@@ -471,10 +476,14 @@ class ReactorConsole:
     @log_exceptions
     async def _enter_broken_effect(self):
         """Fade out the gauge LEDs when we enter broken state"""
-        fade_steps = 35
+        if self.already_broken:
+            return
+        self.already_broken = True
+        fade_steps = 15
         fade_time = 2.5
         dim_backup = self.colorled_global_dimming
         for step in range(fade_steps):
+            step_started = time.time()
             run_commands = []
             fade_value = dim_backup - (dim_backup / fade_steps) * step
             self.colorled_global_dimming = fade_value
@@ -482,18 +491,24 @@ class ReactorConsole:
                 if not self.full_update_pending:
                     run_commands.append(self._update_colorled_value(ledidx))
             if run_commands:
-                asyncio.get_event_loop().create_task(self._handle_commands(run_commands))
-            await asyncio.sleep(fade_time / fade_steps)
+                await self._handle_commands(run_commands)
+            step_done = time.time()
+            took = step_done - step_started
+            sleeptime = (fade_time / fade_steps) - took
+            self.logger.debug('Step {}/{}'.format(step+1, fade_steps))
+            if sleeptime > 0:
+                await asyncio.sleep(sleeptime)
 
         # Set all LEDS off and restore global dimming
         self.colorled_global_dimming = dim_backup
         run_commands = []
+        self.logger.debug('Final turn-off command')
         for ledidx, _ in enumerate(self.colorled_values):
             self.colorled_values[ledidx] = 0.0
             if not self.full_update_pending:
                 run_commands.append(self._update_colorled_value(ledidx))
         if run_commands:
-            asyncio.get_event_loop().create_task(self._handle_commands(run_commands))
+            await self._handle_commands(run_commands)
 
     @log_exceptions
     def _local_update_loop_reset_topleds(self, run_coros):
@@ -580,7 +595,8 @@ class ReactorConsole:
                 run_coros = self._local_update_loop_blinkenlighten(run_coros)
             else:
                 # update random led to eventually clear glitches
-                run_coros.append(self._update_colorled_value(random.randrange(len(self.colorled_values))))
+                # run_coros.append(self._update_colorled_value(random.randrange(len(self.colorled_values))))
+                pass
 
             # Arming and committing
             if handled_arm_state != self.commit_arm_state:
@@ -588,9 +604,9 @@ class ReactorConsole:
                 run_coros = self._local_update_loop_arm_commit(run_coros)
 
             if self.full_update_pending:
-                asyncio.get_event_loop().create_task(self._do_full_update())
+                await self._do_full_update()
             elif run_coros:
-                asyncio.get_event_loop().create_task(self._handle_commands(run_coros))
+                await self._handle_commands(run_coros)
 
             # sleep until it's time to do things again
             spent_time = time.time() - now
@@ -638,6 +654,7 @@ class ReactorConsole:
     @log_exceptions
     def _update_colorled_value(self, ledidx):
         """Maps the normalized led value to the hw value and returns a coroutine that sends it"""
+        # self.logger.debug('Called from: {}'.format(''.join(traceback.format_stack())))
         dimmed = self.colorled_values[ledidx] * self.global_led_dimming_factor * self.colorled_global_dimming
         if ledidx in RED_LEDS_IDX:
             dimmed = dimmed * RED_LEDS_DIM
@@ -652,6 +669,7 @@ class ReactorConsole:
     @log_exceptions
     def _update_topled_value(self, alias):
         """Maps the normalized led value to the hw value and returns a coroutine that sends it"""
+        # self.logger.debug('Called from: {}'.format(''.join(traceback.format_stack())))
         if alias not in self.aliases or alias not in self.topled_values:
             self.logger.error('Invalid top-LED alias "{}"'.format(alias))
             return self._dummytask()
@@ -751,6 +769,8 @@ class ReactorConsole:
     async def _zmq_send_fixed(self):
         """Set status to fixed and send it"""
         self.backend_state['status'] = 'fixed'
+        self.already_broken = False
+        self.use_random_blinkenlichten = BLINKENLICHTEN_DEFAULT
         jsonstr = json.dumps(self.backend_state, ensure_ascii=False)
         await self.zmq_pub_socket.send_multipart([b'local2backend', jsonstr.encode('utf-8')])
         self.commit_arm_state = CommitState.commit_sent
@@ -761,7 +781,10 @@ class ReactorConsole:
             msgparts = await self.zmq_sub_socket.recv_multipart()
             self.logger.debug('Got ZMQ parts: {}'.format(msgparts))
             with self.backend_state_lock:
-                self.backend_state = json.loads(msgparts[1].decode('utf-8'))
+                new_state = json.loads(msgparts[1].decode('utf-8'))
+                if new_state == self.backend_state:
+                    continue
+                self.backend_state = new_state
                 if self.backend_state.get('status', None) is None:
                     self.backend_state['status'] = 'undef'
                 self.backend_state_changed_flag = True

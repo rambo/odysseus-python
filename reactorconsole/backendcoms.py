@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sys
+import time
 
 import ardubus_core
 import zmq
@@ -11,7 +12,7 @@ import zmq
 from helpers import log_exceptions
 
 FRAMEWORK_UPDATE_FPS = 15  # How often to call updates
-
+FORCE_STATE_PUBLISH_INTERVAL = 1
 
 # This is F-UGLY but can't be helped, the framework is not packaged properly
 sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))  # isort:skip
@@ -21,6 +22,7 @@ from odysseus.taskbox import TaskBoxRunner  # isort:skip ; # pylint: disable=C04
 
 class BackendComs:
     """Talk with the backend, communicate with local logic via ZMQ"""
+    last_publish = 0
 
     def __init__(self):
         # init standard logging
@@ -42,10 +44,19 @@ class BackendComs:
     @log_exceptions
     def framework_update(self, state, backend_changed):
         """Called by the odysseys framework periodically"""
-        self.logger.debug('called with state: {}'.format(repr(state)))
-        if backend_changed and state:
+        # self.logger.debug('called with state: {}'.format(repr(state)))
+        force = False
+        if time.time() - self.last_publish > FORCE_STATE_PUBLISH_INTERVAL:
+            force = True
+        if (backend_changed or force) and state:
             jsonstr = json.dumps(state, ensure_ascii=False)
             self.zmq_pub_socket.send_multipart([b'backend2local', jsonstr.encode('utf-8')])
+            if backend_changed:
+                self.logger.info('Pushed new state from backend to ZMQ')
+            else:
+                self.logger.debug('Force-Pushed old state from backend to ZMQ')
+            self.logger.debug('Pushed state was {}'.format(repr(state)))
+            self.last_publish = time.time()
 
         local_state_received = False
         try:
