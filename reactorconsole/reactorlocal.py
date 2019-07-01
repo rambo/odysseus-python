@@ -779,6 +779,9 @@ class ReactorConsole:
     async def _zmq_send_fixed(self):
         """Set status to fixed and send it"""
         self.backend_state['status'] = 'fixed'
+        self.toptext = self.backend_state['toptext']
+        self.arm_previous_top_text = self.backend_state['toptext']
+        self.loop.create_task(self._update_toptext())
         self.already_broken = False
         self.use_random_blinkenlichten = BLINKENLICHTEN_DEFAULT
         jsonstr = json.dumps(self.backend_state, ensure_ascii=False)
