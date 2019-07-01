@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import sys
-import time
 
 import ardubus_core
 import zmq
@@ -12,7 +11,6 @@ import zmq
 from helpers import log_exceptions
 
 FRAMEWORK_UPDATE_FPS = 15  # How often to call updates
-FORCE_STATE_PUBLISH_INTERVAL = 1
 
 # This is F-UGLY but can't be helped, the framework is not packaged properly
 sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))  # isort:skip
@@ -22,7 +20,6 @@ from odysseus.taskbox import TaskBoxRunner  # isort:skip ; # pylint: disable=C04
 
 class BackendComs:
     """Talk with the backend, communicate with local logic via ZMQ"""
-    last_publish = 0
 
     def __init__(self):
         # init standard logging
@@ -39,16 +36,29 @@ class BackendComs:
         self.zmq_pub_socket.bind('ipc:///tmp/reactor_backend.zmq')
         self.zmq_sub_socket.connect('ipc:///tmp/reactor_locallogic.zmq')
         self.zmq_sub_socket.subscribe(b'local2backend')
+        self.zmq_sub_socket.subscribe(b'staterequest')
         self.zmq_sub_socket.setsockopt(zmq.RCVTIMEO, 100)  # pylint: disable=E1101
 
     @log_exceptions
     def framework_update(self, state, backend_changed):
         """Called by the odysseys framework periodically"""
         # self.logger.debug('called with state: {}'.format(repr(state)))
-        force = False
-        if time.time() - self.last_publish > FORCE_STATE_PUBLISH_INTERVAL:
-            force = True
-        if (backend_changed or force) and state:
+        force_state_send = False
+        local_state_received = False
+
+        try:
+            ret = self.zmq_sub_socket.recv_multipart()
+            self.logger.debug('Got ZMQ parts: {}'.format(ret))
+            if ret[0] == b'staterequest':
+                force_state_send = True
+            elif ret[0] == b'local2backend':
+                local_state_received = True
+                state = json.loads(ret[1].decode('utf-8'))
+        except zmq.Again:
+            # No new messages from backend
+            pass
+
+        if (backend_changed or force_state_send) and state:
             jsonstr = json.dumps(state, ensure_ascii=False)
             self.zmq_pub_socket.send_multipart([b'backend2local', jsonstr.encode('utf-8')])
             if backend_changed:
@@ -56,17 +66,6 @@ class BackendComs:
             else:
                 self.logger.debug('Force-Pushed old state from backend to ZMQ')
             self.logger.debug('Pushed state was {}'.format(repr(state)))
-            self.last_publish = time.time()
-
-        local_state_received = False
-        try:
-            ret = self.zmq_sub_socket.recv_multipart()
-            self.logger.debug('Got ZMQ parts: {}'.format(ret))
-            local_state_received = True
-            state = json.loads(ret[1].decode('utf-8'))
-        except zmq.Again:
-            # No new messages from backend
-            pass
 
         if local_state_received:
             return state

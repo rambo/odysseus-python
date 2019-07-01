@@ -8,7 +8,6 @@ import random
 import signal as posixsignal
 import threading
 import time
-import traceback
 
 import ardubus_core
 import ardubus_core.deviceconfig
@@ -263,12 +262,15 @@ class ReactorConsole:
         # Set defined topleds to values according to expectation
         leds_remaining = set(self.topled_values.keys())
         ok_positions = []
+        update_toptext = False
+        expected_count_adjust = 0
         with self.backend_state_lock:
             # self.logger.debug('"expected" backend state: {}'.format(repr(self.backend_state['expected'])))
             # self.logger.debug('"lights" backend state: {}'.format(repr(self.backend_state['lights'])))
             for position in sorted(self.backend_state['expected'].keys()):
                 if position in BROKEN_TOPLEDS:
                     # Skip ones where we have no feedback to the user
+                    expected_count_adjust -= 1
                     continue
                 if position not in self.backend_state['lights']:
                     self.logger.error('No light state defined for expected position {}'.format(position))
@@ -307,14 +309,23 @@ class ReactorConsole:
                 if not force_led_update and not self.gauge_directions[up_alias] and not self.gauge_directions[dn_alias]:
                     # Skip led updates that have not been moved
                     continue
+                update_toptext = True
 
                 if not self.full_update_pending:
                     leds_remaining.remove(led_alias)
                     run_coros.append(self._update_topled_value(led_alias))
 
+        if update_toptext and self.commit_arm_state < CommitState.armed:
+            self.toptext = '{}-{}'.format(
+                len(ok_positions), len(self.backend_state['expected']) + expected_count_adjust
+            )
+            if not self.full_update_pending:
+                run_coros.append(self._update_toptext())
+
         if report_led_status:
             self.logger.info('OK Gauges: {}/{} (flag={})'.format(
-                len(ok_positions), len(self.backend_state['expected']), self.gauges_match_expected
+                len(ok_positions), len(self.backend_state['expected']) + expected_count_adjust,
+                self.gauges_match_expected
             ))
 
         # Update some extra leds every iteration (to get eventually rid of glitched ones)
@@ -495,7 +506,7 @@ class ReactorConsole:
             step_done = time.time()
             took = step_done - step_started
             sleeptime = (fade_time / fade_steps) - took
-            self.logger.debug('Step {}/{}'.format(step+1, fade_steps))
+            self.logger.debug('Step {}/{}'.format(step + 1, fade_steps))
             if sleeptime > 0:
                 await asyncio.sleep(sleeptime)
 
@@ -565,6 +576,7 @@ class ReactorConsole:
         handled_arm_state = None
         self.arm_previous_top_text = ''
         interval = (1.0 / LOCAL_UPDATE_FPS)
+        await self.zmq_pub_socket.send_multipart([b'staterequest', b'1'])
         while self.keep_running:
             # Keep track of what we need to do
             now = time.time()
@@ -654,7 +666,6 @@ class ReactorConsole:
     @log_exceptions
     def _update_colorled_value(self, ledidx):
         """Maps the normalized led value to the hw value and returns a coroutine that sends it"""
-        # self.logger.debug('Called from: {}'.format(''.join(traceback.format_stack())))
         dimmed = self.colorled_values[ledidx] * self.global_led_dimming_factor * self.colorled_global_dimming
         if ledidx in RED_LEDS_IDX:
             dimmed = dimmed * RED_LEDS_DIM
@@ -669,7 +680,6 @@ class ReactorConsole:
     @log_exceptions
     def _update_topled_value(self, alias):
         """Maps the normalized led value to the hw value and returns a coroutine that sends it"""
-        # self.logger.debug('Called from: {}'.format(''.join(traceback.format_stack())))
         if alias not in self.aliases or alias not in self.topled_values:
             self.logger.error('Invalid top-LED alias "{}"'.format(alias))
             return self._dummytask()
@@ -779,14 +789,15 @@ class ReactorConsole:
         """Handle incoming ZMQ messages"""
         while self.keep_running:
             msgparts = await self.zmq_sub_socket.recv_multipart()
-            self.logger.debug('Got ZMQ parts: {}'.format(msgparts))
+            self.logger.info('Got ZMQ parts: {}'.format(msgparts))
+            if msgparts[0] != b'backend2local':
+                continue
             with self.backend_state_lock:
                 new_state = json.loads(msgparts[1].decode('utf-8'))
-                if new_state == self.backend_state:
-                    continue
+                if new_state.get('status', None) is None:
+                    new_state['status'] = 'undef'
+                # PONDER: how to check actual change ?
                 self.backend_state = new_state
-                if self.backend_state.get('status', None) is None:
-                    self.backend_state['status'] = 'undef'
                 self.backend_state_changed_flag = True
 
     @log_exceptions
