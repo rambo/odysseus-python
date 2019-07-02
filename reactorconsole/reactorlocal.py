@@ -112,7 +112,7 @@ class ReactorConsole:
         self._arm_blink_active = False
 
     @log_exceptions
-    def _local_update_loop_move_gauges(self, run_coros):  # pylint: disable=R0912
+    async def _local_update_loop_move_gauges(self, run_coros):  # pylint: disable=R0912
         """Handle the gauge update part"""
         remaining_gauges = set(self.gauge_values.keys())
         with self.event_state_lock:
@@ -232,7 +232,7 @@ class ReactorConsole:
         await self._handle_commands(run_coros)
 
     @log_exceptions
-    def _local_update_loop_check_gauges(self, run_coros):  # pylint: disable=R0912
+    async def _local_update_loop_check_gauges(self, run_coros):  # pylint: disable=R0912
         """Check backend expected vs current value and set the topleds accordingly"""
         self.gauges_match_expected = True
         if not self.backend_state:
@@ -407,7 +407,7 @@ class ReactorConsole:
         RED_LEDS_DIM = red_fade_backup
 
     @log_exceptions
-    def _local_update_loop_arm_commit(self, run_coros):
+    async def _local_update_loop_arm_commit(self, run_coros):
         """Handle arm and commit"""
         with self.event_state_lock:
             if self.commit_arm_state == CommitState.ready:
@@ -433,7 +433,7 @@ class ReactorConsole:
         return run_coros
 
     @log_exceptions
-    def _local_update_loop_blinkenlighten(self, run_coros):
+    async def _local_update_loop_blinkenlighten(self, run_coros):
         """Blink the gauge LEDs randomly"""
         for idx, current_val in enumerate(self.colorled_values):
             change_prob = 0.05
@@ -522,16 +522,14 @@ class ReactorConsole:
             await self._handle_commands(run_commands)
 
     @log_exceptions
-    def _local_update_loop_reset_topleds(self, run_coros):
+    async def _local_update_loop_reset_topleds(self, run_coros):
         """Reset the topleds (called on backend state change"""
-        for alias in self.topled_values:
-            self.topled_values[alias] = 0.0
-            if not self.full_update_pending:
-                run_coros.append(self._update_topled_value(alias))
+        if not self.full_update_pending:
+            run_coros.append(self.aliases['rod_3_3_led']['PROXY'].reset())
         return run_coros
 
     @log_exceptions
-    def _local_update_loop_backend_toptext(self, run_coros):
+    async def _local_update_loop_backend_toptext(self, run_coros):
         """Handle backend set toptext"""
         new_toptext = self.backend_state.get('toptext', None)
         if new_toptext is not None:
@@ -596,15 +594,15 @@ class ReactorConsole:
                 if self.backend_state.get('broken_jump', False):
                     asyncio.get_event_loop().create_task(self._enter_broken_jump_effect())
                 # Top-leds
-                run_coros = self._local_update_loop_reset_topleds(run_coros)
+                run_coros = await self._local_update_loop_reset_topleds(run_coros)
                 # top-text
-                run_coros = self._local_update_loop_backend_toptext(run_coros)
+                run_coros = await self._local_update_loop_backend_toptext(run_coros)
 
             # Other processing
-            run_coros = self._local_update_loop_move_gauges(run_coros)
-            run_coros = self._local_update_loop_check_gauges(run_coros)
+            run_coros = await self._local_update_loop_move_gauges(run_coros)
+            run_coros = await self._local_update_loop_check_gauges(run_coros)
             if self.use_random_blinkenlichten:
-                run_coros = self._local_update_loop_blinkenlighten(run_coros)
+                run_coros = await self._local_update_loop_blinkenlighten(run_coros)
             else:
                 # update random led to eventually clear glitches
                 # run_coros.append(self._update_colorled_value(random.randrange(len(self.colorled_values))))
@@ -613,7 +611,7 @@ class ReactorConsole:
             # Arming and committing
             if handled_arm_state != self.commit_arm_state:
                 handled_arm_state = self.commit_arm_state
-                run_coros = self._local_update_loop_arm_commit(run_coros)
+                run_coros = await self._local_update_loop_arm_commit(run_coros)
 
             if self.full_update_pending:
                 await self._do_full_update()
@@ -736,6 +734,8 @@ class ReactorConsole:
             run_coros.append(self._update_colorled_value(idx))
         # Top-text/number
         run_coros.append(self._update_toptext())
+        # reset I2C LED controllers
+        await self.aliases['rod_3_3_led']['PROXY'].reset()
         # Run all the jobs (in random order just in case some specific access pattern is more likely to glitch
         random.shuffle(run_coros)
         await self._handle_commands(run_coros)
