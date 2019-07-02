@@ -37,7 +37,7 @@ class BackendComs:
         self.zmq_sub_socket.connect('ipc:///tmp/reactor_locallogic.zmq')
         self.zmq_sub_socket.subscribe(b'local2backend')
         self.zmq_sub_socket.subscribe(b'staterequest')
-        self.zmq_sub_socket.setsockopt(zmq.RCVTIMEO, 100)  # pylint: disable=E1101
+        self.zmq_sub_socket.setsockopt(zmq.RCVTIMEO, int(1.0 / (FRAMEWORK_UPDATE_FPS + 1) * 1000))  # pylint: disable=E1101
 
     @log_exceptions
     def framework_update(self, state, backend_changed):
