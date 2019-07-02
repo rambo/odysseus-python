@@ -6,7 +6,6 @@ import json
 import logging
 import random
 import signal as posixsignal
-import threading
 import time
 
 import ardubus_core
@@ -98,8 +97,8 @@ class ReactorConsole:
         self.zmq_sub_socket.connect('ipc:///tmp/reactor_backend.zmq')
         self.zmq_sub_socket.subscribe(b'backend2local')
 
-        self.event_state_lock = threading.Lock()
-        self.backend_state_lock = threading.Lock()
+        self.event_state_lock = asyncio.Lock()
+        self.backend_state_lock = asyncio.Lock()
         self.backend_state_changed_flag = False
         self.backend_state = {}
         self.aliases = {}
@@ -115,7 +114,7 @@ class ReactorConsole:
     async def _local_update_loop_move_gauges(self, run_coros):  # pylint: disable=R0912
         """Handle the gauge update part"""
         remaining_gauges = set(self.gauge_values.keys())
-        with self.event_state_lock:
+        with await self.event_state_lock:
             # Move gauges
             for gauge_alias in self.gauge_values:
                 up_alias = gauge_alias.replace('_gauge', '_up')
@@ -264,7 +263,7 @@ class ReactorConsole:
         ok_positions = []
         update_toptext = False
         expected_count_adjust = 0
-        with self.backend_state_lock:
+        with await self.backend_state_lock:
             # self.logger.debug('"expected" backend state: {}'.format(repr(self.backend_state['expected'])))
             # self.logger.debug('"lights" backend state: {}'.format(repr(self.backend_state['lights'])))
             for position in sorted(self.backend_state['expected'].keys()):
@@ -409,7 +408,7 @@ class ReactorConsole:
     @log_exceptions
     async def _local_update_loop_arm_commit(self, run_coros):
         """Handle arm and commit"""
-        with self.event_state_lock:
+        with await self.event_state_lock:
             if self.commit_arm_state == CommitState.ready:
                 self.toptext = self.arm_previous_top_text
                 if not self.full_update_pending:
@@ -461,7 +460,7 @@ class ReactorConsole:
 
             for alias in self.topled_values:
                 # Check for broken state so we won't mess with the actual fixing task by blinking the topleds
-                with self.backend_state_lock:
+                with await self.backend_state_lock:
                     if self.backend_state.get('status', 'undef') == 'broken':
                         continue
                     current_val = self.topled_values[alias]
@@ -747,7 +746,12 @@ class ReactorConsole:
     @log_exceptions
     def ardubus_callback(self, event):
         """Ardubus events callback"""
-        with self.event_state_lock:
+        self.loop.create_task(self.ardubus_callback_coro(event))
+
+    @log_exceptions
+    async def ardubus_callback_coro(self, event):
+        """Ardubus events callback, coro so we can handle the lock via the eventloop"""
+        with await self.event_state_lock:
             if not isinstance(event, ardubus_core.events.Status):
                 self.logger.debug('Called with {}'.format(event))
 
@@ -795,7 +799,7 @@ class ReactorConsole:
             self.logger.info('Got ZMQ parts: {}'.format(msgparts))
             if msgparts[0] != b'backend2local':
                 continue
-            with self.backend_state_lock:
+            with await self.backend_state_lock:
                 new_state = json.loads(msgparts[1].decode('utf-8'))
                 if new_state.get('status', None) is None:
                     new_state['status'] = 'undef'
