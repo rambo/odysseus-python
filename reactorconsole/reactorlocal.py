@@ -32,7 +32,8 @@ RED_LEDS_DIM = 0.1
 COLORLED_DEFAULT_GLOBAL_DIM = 0.25
 BLINKENLICHTEN_DEFAULT = True
 JUMPING_GAUGE_DRIFT_SPEED = (1.0 / LOCAL_UPDATE_FPS) / 90  # 1.5 minutes to drift from full to down
-ALLOW_PUNISH = False
+ALLOW_WRONGCOMMIT_PUNISH = False
+ALLOW_WRONG_COMMIT = True
 BROKEN_TOPLEDS = (
     '5_3',
     '3_0'
@@ -351,7 +352,7 @@ class ReactorConsole:
         # Randomize gauge values
         run_commands = []
         # Disable punishment for for now.
-        if ALLOW_PUNISH:
+        if ALLOW_WRONGCOMMIT_PUNISH:
             for alias in self.gauge_values:
                 backend_key = alias.replace('_gauge', '').replace('rod_', '')
                 if random.random() > 0.5 or backend_key in self.backend_state['expected']:
@@ -419,7 +420,7 @@ class ReactorConsole:
                 if not self.full_update_pending:
                     run_coros.append(self._update_toptext())
             if self.commit_arm_state == CommitState.committed:
-                if not self.gauges_match_expected:
+                if not ALLOW_WRONG_COMMIT and not self.gauges_match_expected:
                     asyncio.get_event_loop().create_task(self._invalid_commit_punish())
                 else:
                     self.commit_arm_state = CommitState.send_commit
